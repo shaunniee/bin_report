@@ -7,6 +7,8 @@ from binance.client import Client
 from telegram import Update, Bot, InputFile
 from telegram.ext import Application, CommandHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import nest_asyncio
+import asyncio
 
 # === CONFIGURATION ===
 API_KEY = os.getenv("BINANCE_API_KEY")
@@ -216,40 +218,8 @@ async def monthly_report_command(update: Update, context: ContextTypes.DEFAULT_T
         start = datetime(year, month, 1)
         end = datetime(year + (month // 12), (month % 12) + 1, 1)
         trades = list(trades_collection.find({"timestamp": {"$gte": start, "$lt": end}}))
-        report, file = generate_monthly_report
         report, file = generate_monthly_report(trades, year, month)
         await send_telegram(report, document=open(file, "rb"))
     except Exception as e:
         logger.error(f"/monthly_report command error: {e}")
-        await update.message.reply_text("⚠️ Failed to generate monthly report. Usage: /monthly_report <year> <month>")
-
-# === MAIN ===
-async def main():
-    try:
-        app = Application.builder().token(TELEGRAM_TOKEN).build()
-        app.add_handler(CommandHandler("report", report_command))
-        app.add_handler(CommandHandler("monthly_report", monthly_report_command))
-
-        scheduler = AsyncIOScheduler()
-        scheduler.add_job(send_reports, 'cron', hour=23, minute=59)
-        scheduler.add_job(send_monthly_report, 'cron', day=1, hour=0, minute=0)
-        scheduler.start()
-
-        trades = fetch_trades()
-        log_trades_to_db(trades)
-
-        await app.run_polling()
-    except Exception as e:
-        logger.error(f"Bot startup error: {e}")
-
-# === ENTRY POINT ===
-if __name__ == "__main__":
-    import asyncio
-    try:
-        import nest_asyncio
-        nest_asyncio.apply()
-        loop = asyncio.get_event_loop()
-        loop.create_task(main())
-    except RuntimeError:
-        asyncio.run(main())
-
+        await update.message.reply_text
