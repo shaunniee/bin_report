@@ -3,7 +3,6 @@ import pandas as pd
 from datetime import datetime, timedelta
 from pymongo import MongoClient
 from binance.client import Client
-from binance.enums import *
 from telegram import Update, Bot, InputFile
 from telegram.ext import Application, CommandHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -20,7 +19,6 @@ SYMBOL = "XRPUSDT"
 client = Client(API_KEY, API_SECRET)
 client.API_URL = 'https://testnet.binance.vision/api'  # Remove for live trading
 bot = Bot(token=TELEGRAM_TOKEN)
-
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["trading_bot"]
 trades_collection = db["trades"]
@@ -36,37 +34,52 @@ def fetch_trades():
 
 def log_trades_to_db(trades):
     for trade in trades:
-        trade_id = trade['id']
-        if not trades_collection.find_one({"id": trade_id}):
+        if not trades_collection.find_one({"id": trade["id"]}):
             trade["timestamp"] = datetime.utcfromtimestamp(trade["time"] / 1000)
             trades_collection.insert_one(trade)
 
+def group_trades_by_order_id(trades):
+    grouped = {}
+    for trade in trades:
+        oid = trade["orderId"]
+        if oid not in grouped:
+            grouped[oid] = {
+                "isBuyer": trade["isBuyer"],
+                "qty": 0,
+                "price_sum": 0,
+                "commission": 0,
+                "trades": []
+            }
+        grouped[oid]["qty"] += float(trade["qty"])
+        grouped[oid]["price_sum"] += float(trade["qty"]) * float(trade["price"])
+        grouped[oid]["commission"] += float(trade["commission"])
+        grouped[oid]["trades"].append(trade)
+    for g in grouped.values():
+        g["price"] = g["price_sum"] / g["qty"]
+    return grouped
+
 def calculate_fifo_pnl(trades):
-    buy_trades = [t for t in trades if t['isBuyer']]
-    sell_trades = [t for t in trades if not t['isBuyer']]
+    grouped = group_trades_by_order_id(trades)
+    buys = [g for g in grouped.values() if g["isBuyer"]]
+    sells = [g for g in grouped.values() if not g["isBuyer"]]
     buy_queue = []
-
-    for buy in buy_trades:
-        buy_queue.append({
-            "qty": float(buy['qty']),
-            "price": float(buy['price']),
-            "fee": float(buy['commission'])
-        })
-
     pnl = 0
-    for sell in sell_trades:
-        sell_qty = float(sell['qty'])
-        sell_price = float(sell['price'])
-        sell_fee = float(sell['commission'])
+
+    for b in buys:
+        buy_queue.append({"qty": b["qty"], "price": b["price"], "fee": b["commission"]})
+
+    for s in sells:
+        sell_qty = s["qty"]
+        sell_price = s["price"]
+        sell_fee = s["commission"]
 
         while sell_qty > 0 and buy_queue:
             buy = buy_queue[0]
-            matched_qty = min(sell_qty, buy['qty'])
-            pnl += matched_qty * (sell_price - buy['price'])
-            sell_qty -= matched_qty
-            buy['qty'] -= matched_qty
-
-            if buy['qty'] == 0:
+            matched = min(sell_qty, buy["qty"])
+            pnl += matched * (sell_price - buy["price"])
+            sell_qty -= matched
+            buy["qty"] -= matched
+            if buy["qty"] == 0:
                 buy_queue.pop(0)
 
         pnl -= sell_fee
@@ -74,56 +87,51 @@ def calculate_fifo_pnl(trades):
     return pnl
 
 def calculate_win_loss_ratio(trades):
-    buy_trades = [t for t in trades if t['isBuyer']]
-    sell_trades = [t for t in trades if not t['isBuyer']]
+    grouped = group_trades_by_order_id(trades)
+    buys = [g for g in grouped.values() if g["isBuyer"]]
+    sells = [g for g in grouped.values() if not g["isBuyer"]]
     buy_queue = []
+    wins = losses = 0
 
-    for buy in buy_trades:
-        buy_queue.append({
-            "qty": float(buy['qty']),
-            "price": float(buy['price'])
-        })
+    for b in buys:
+        buy_queue.append({"qty": b["qty"], "price": b["price"]})
 
-    wins = 0
-    losses = 0
-    for sell in sell_trades:
-        sell_qty = float(sell['qty'])
-        sell_price = float(sell['price'])
+    for s in sells:
+        sell_qty = s["qty"]
+        sell_price = s["price"]
 
         while sell_qty > 0 and buy_queue:
             buy = buy_queue[0]
-            matched_qty = min(sell_qty, buy['qty'])
-            if sell_price > buy['price']:
+            matched = min(sell_qty, buy["qty"])
+            if sell_price > buy["price"]:
                 wins += 1
             else:
                 losses += 1
-            sell_qty -= matched_qty
-            buy['qty'] -= matched_qty
-
-            if buy['qty'] == 0:
+            sell_qty -= matched
+            buy["qty"] -= matched
+            if buy["qty"] == 0:
                 buy_queue.pop(0)
 
-    win_loss_ratio = wins / losses if losses > 0 else float('inf')
-    return wins, losses, win_loss_ratio
+    return wins, losses, wins / losses if losses > 0 else float("inf")
 
-def generate_report(trades, period_name):
-    total_trades = len(trades)
-    total_volume = sum(float(t['qty']) * float(t['price']) for t in trades)
-    total_fees = sum(float(t['commission']) for t in trades)
+def generate_report(trades, label):
+    grouped = group_trades_by_order_id(trades)
+    total_trades = len(grouped)
+    total_volume = sum(g["qty"] * g["price"] for g in grouped.values())
+    total_fees = sum(g["commission"] for g in grouped.values())
     pnl = calculate_fifo_pnl(trades)
-    wins, losses, win_loss_ratio = calculate_win_loss_ratio(trades)
+    wins, losses, ratio = calculate_win_loss_ratio(trades)
 
-    report = (
-        f"📊 {period_name} Trading Report\n"
+    return (
+        f"📊 {label} Trading Report\n"
         f"----------------------------------------\n"
         f"🛒 Trades Executed: {total_trades}\n"
         f"💰 Total Volume: {total_volume:.2f} USDT\n"
         f"📈 Net PnL: {pnl:.2f} USDT\n"
         f"💸 Total Fees: {total_fees:.2f} USDT\n"
         f"✅ Wins: {wins} | ❌ Losses: {losses}\n"
-        f"📊 Win/Loss Ratio: {win_loss_ratio:.2f}\n"
+        f"📊 Win/Loss Ratio: {ratio:.2f}\n"
     )
-    return report
 
 def generate_monthly_report(trades, year, month):
     report = generate_report(trades, f"Monthly {year}-{month:02d}")
@@ -135,24 +143,21 @@ def generate_monthly_report(trades, year, month):
 # === REPORT SCHEDULING ===
 async def send_reports():
     now = datetime.utcnow()
-    start_of_day = datetime(now.year, now.month, now.day)
-    start_of_year = datetime(now.year, 1, 1)
-
-    daily_trades = list(trades_collection.find({"timestamp": {"$gte": start_of_day}}))
-    ytd_trades = list(trades_collection.find({"timestamp": {"$gte": start_of_year}}))
-
-    await send_telegram(generate_report(daily_trades, "Daily"))
-    await send_telegram(generate_report(ytd_trades, "YTD"))
+    start_day = datetime(now.year, now.month, now.day)
+    start_year = datetime(now.year, 1, 1)
+    daily = list(trades_collection.find({"timestamp": {"$gte": start_day}}))
+    ytd = list(trades_collection.find({"timestamp": {"$gte": start_year}}))
+    await send_telegram(generate_report(daily, "Daily"))
+    await send_telegram(generate_report(ytd, "YTD"))
 
 async def send_monthly_report():
     now = datetime.utcnow()
-    start_of_month = datetime(now.year, now.month, 1)
-    end_of_last_month = start_of_month - timedelta(days=1)
-    start_of_last_month = datetime(end_of_last_month.year, end_of_last_month.month, 1)
-
-    trades = list(trades_collection.find({"timestamp": {"$gte": start_of_last_month, "$lt": start_of_month}}))
-    report, filename = generate_monthly_report(trades, end_of_last_month.year, end_of_last_month.month)
-    await send_telegram(report, document=open(filename, "rb"))
+    start_month = datetime(now.year, now.month, 1)
+    end_last = start_month - timedelta(days=1)
+    start_last = datetime(end_last.year, end_last.month, 1)
+    trades = list(trades_collection.find({"timestamp": {"$gte": start_last, "$lt": start_month}}))
+    report, file = generate_monthly_report(trades, end_last.year, end_last.month)
+    await send_telegram(report, document=open(file, "rb"))
 
 # === TELEGRAM COMMANDS ===
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -167,8 +172,8 @@ async def monthly_report_command(update: Update, context: ContextTypes.DEFAULT_T
         start = datetime(year, month, 1)
         end = datetime(year + (month // 12), (month % 12) + 1, 1)
         trades = list(trades_collection.find({"timestamp": {"$gte": start, "$lt": end}}))
-        report, filename = generate_monthly_report(trades, year, month)
-        await send_telegram(report, document=open(filename, "rb"))
+        report, file = generate_monthly_report(trades, year, month)
+        await send_telegram(report, document=open(file, "rb"))
     except Exception:
         await update.message.reply_text("Usage: /monthly_report <year> <month>")
 
@@ -185,12 +190,8 @@ async def main():
 
     trades = fetch_trades()
     log_trades_to_db(trades)
-
     await app.run_polling()
 
 if __name__ == "__main__":
     import asyncio
-    try:
-        asyncio.get_running_loop().run_until_complete(main())
-    except RuntimeError:
-        asyncio.run(main())
+    asyncio.run(main())
