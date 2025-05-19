@@ -34,8 +34,10 @@ def fetch_trades():
 
 def log_trades_to_db(trades):
     for trade in trades:
-        trade["timestamp"] = datetime.utcfromtimestamp(trade["time"] / 1000)
-        trades_collection.insert_one(trade)
+        order_id = trade['orderId']
+        if not trades_collection.find_one({"orderId": order_id}):
+            trade["timestamp"] = datetime.utcfromtimestamp(trade["time"] / 1000)
+            trades_collection.insert_one(trade)
 
 def calculate_fifo_pnl(trades):
     buy_trades = [t for t in trades if t['isBuyer']]
