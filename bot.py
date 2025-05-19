@@ -220,19 +220,20 @@ if __name__ == "__main__":
 
     nest_asyncio.apply()
 
-    # Initialize the Telegram bot application
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    async def main():
+        application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Add command handlers
-    application.add_handler(CommandHandler("report", report_command))
-    application.add_handler(CommandHandler("monthly_report", monthly_report_command))
+        # Add command handlers
+        application.add_handler(CommandHandler("report", report_command))
+        application.add_handler(CommandHandler("monthly_report", monthly_report_command))
 
-    # Set up and start the scheduler
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(send_reports, 'cron', hour=0, minute=0)  # Daily at midnight UTC
-    scheduler.add_job(send_monthly_report, 'cron', day=1, hour=1)  # Monthly on the 1st at 01:00 UTC
-    scheduler.start()
+        # Set up and start the scheduler
+        scheduler = AsyncIOScheduler()
+        scheduler.add_job(send_reports, 'cron', hour=0, minute=0)
+        scheduler.add_job(send_monthly_report, 'cron', day=1, hour=1)
+        scheduler.start()
 
-    # Start the bot
-    logger.info("✅ Bot is now polling for commands...")
-    application.run_polling()
+        logger.info("✅ Bot is now polling for commands...")
+        await application.run_polling()
+
+    asyncio.run(main())
