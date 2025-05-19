@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from pymongo import MongoClient
 from binance.client import Client
-from telegram import Update, Bot, InputFile
+from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import nest_asyncio
@@ -21,6 +21,7 @@ SYMBOL = "XRPUSDT"
 # === LOGGING ===
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logger.info("🚀 Starting trading bot...")
 
 # === INIT ===
 client = Client(API_KEY, API_SECRET)
@@ -44,7 +45,7 @@ def fetch_trades():
         return client.get_my_trades(symbol=SYMBOL)
     except Exception as e:
         logger.error(f"Binance fetch error: {e}")
-        return []
+    return []
 
 def log_trades_to_db(trades):
     try:
@@ -85,15 +86,12 @@ def calculate_fifo_pnl(trades):
         sells = [g for g in grouped.values() if not g["isBuyer"]]
         buy_queue = []
         pnl = 0
-
         for b in buys:
             buy_queue.append({"qty": b["qty"], "price": b["price"], "fee": b["commission"]})
-
         for s in sells:
             sell_qty = s["qty"]
             sell_price = s["price"]
             sell_fee = s["commission"]
-
             while sell_qty > 0 and buy_queue:
                 buy = buy_queue[0]
                 matched = min(sell_qty, buy["qty"])
@@ -102,13 +100,11 @@ def calculate_fifo_pnl(trades):
                 buy["qty"] -= matched
                 if buy["qty"] == 0:
                     buy_queue.pop(0)
-
             pnl -= sell_fee
-
         return pnl
     except Exception as e:
         logger.error(f"PnL calculation error: {e}")
-        return 0
+    return 0
 
 def calculate_win_loss_ratio(trades):
     try:
@@ -117,14 +113,11 @@ def calculate_win_loss_ratio(trades):
         sells = [g for g in grouped.values() if not g["isBuyer"]]
         buy_queue = []
         wins = losses = 0
-
         for b in buys:
             buy_queue.append({"qty": b["qty"], "price": b["price"]})
-
         for s in sells:
             sell_qty = s["qty"]
             sell_price = s["price"]
-
             while sell_qty > 0 and buy_queue:
                 buy = buy_queue[0]
                 matched = min(sell_qty, buy["qty"])
@@ -136,11 +129,10 @@ def calculate_win_loss_ratio(trades):
                 buy["qty"] -= matched
                 if buy["qty"] == 0:
                     buy_queue.pop(0)
-
         return wins, losses, wins / losses if losses > 0 else float("inf")
     except Exception as e:
         logger.error(f"Win/loss calculation error: {e}")
-        return 0, 0, 0
+    return 0, 0, 0
 
 def generate_report(trades, label):
     try:
@@ -150,7 +142,6 @@ def generate_report(trades, label):
         total_fees = sum(g["commission"] for g in grouped.values())
         pnl = calculate_fifo_pnl(trades)
         wins, losses, ratio = calculate_win_loss_ratio(trades)
-
         return (
             f"📊 {label} Trading Report\n"
             f"----------------------------------------\n"
@@ -158,12 +149,12 @@ def generate_report(trades, label):
             f"💰 Total Volume: {total_volume:.2f} USDT\n"
             f"📈 Net PnL: {pnl:.2f} USDT\n"
             f"💸 Total Fees: {total_fees:.2f} USDT\n"
-            f"✅ Wins: {wins} | ❌ Losses: {losses}\n"
+            f"✅ Wins: {wins} \n ❌ Losses: {losses}\n"
             f"📊 Win/Loss Ratio: {ratio:.2f}\n"
         )
     except Exception as e:
         logger.error(f"Report generation error: {e}")
-        return "⚠️ Failed to generate report."
+    return "⚠️ Failed to generate report."
 
 def generate_monthly_report(trades, year, month):
     try:
@@ -174,9 +165,8 @@ def generate_monthly_report(trades, year, month):
         return report, filename
     except Exception as e:
         logger.error(f"Monthly report error: {e}")
-        return "⚠️ Failed to generate monthly report.", None
-
-# === REPORT SCHEDULING ===
+    return "⚠️ Failed to generate monthly report.", None
+# === SCHEDULED TASKS ===
 async def send_reports():
     try:
         now = datetime.utcnow()
@@ -222,4 +212,27 @@ async def monthly_report_command(update: Update, context: ContextTypes.DEFAULT_T
         await send_telegram(report, document=open(file, "rb"))
     except Exception as e:
         logger.error(f"/monthly_report command error: {e}")
-        await update.message.reply_text
+        await update.message.reply_text("⚠️ Failed to generate monthly report.")
+
+if __name__ == "__main__":
+    import nest_asyncio
+    import asyncio
+
+    nest_asyncio.apply()
+
+    # Initialize the Telegram bot application
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # Add command handlers
+    application.add_handler(CommandHandler("report", report_command))
+    application.add_handler(CommandHandler("monthly_report", monthly_report_command))
+
+    # Set up and start the scheduler
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(send_reports, 'cron', hour=0, minute=0)  # Daily at midnight UTC
+    scheduler.add_job(send_monthly_report, 'cron', day=1, hour=1)  # Monthly on the 1st at 01:00 UTC
+    scheduler.start()
+
+    # Start the bot
+    logger.info("✅ Bot is now polling for commands...")
+    application.run_polling()
