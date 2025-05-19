@@ -17,6 +17,7 @@ SYMBOL = "XRPUSDT"
 
 # === INIT ===
 client = Client(API_KEY, API_SECRET)
+# Remove this line for live trading
 client.API_URL = 'https://testnet.binance.vision/api'
 bot = Bot(token=TELEGRAM_TOKEN)
 
@@ -29,34 +30,75 @@ async def send_telegram(msg):
     await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
 
 def fetch_trades():
-    trades = client.get_my_trades(symbol=SYMBOL)
-    return trades
+    return client.get_my_trades(symbol=SYMBOL)
 
 def log_trades_to_db(trades):
     for trade in trades:
         trade["timestamp"] = datetime.utcfromtimestamp(trade["time"] / 1000)
         trades_collection.insert_one(trade)
 
-def calculate_pnl(trades):
+def calculate_fifo_pnl(trades):
     buy_trades = [t for t in trades if t['isBuyer']]
     sell_trades = [t for t in trades if not t['isBuyer']]
-    total_buy_cost = sum(float(t['qty']) * float(t['price']) for t in buy_trades)
-    total_sell_value = sum(float(t['qty']) * float(t['price']) for t in sell_trades)
-    return total_sell_value - total_buy_cost
+    buy_queue = []
+
+    for buy in buy_trades:
+        buy_queue.append({
+            "qty": float(buy['qty']),
+            "price": float(buy['price']),
+            "fee": float(buy['commission'])
+        })
+
+    pnl = 0
+    for sell in sell_trades:
+        sell_qty = float(sell['qty'])
+        sell_price = float(sell['price'])
+        sell_fee = float(sell['commission'])
+
+        while sell_qty > 0 and buy_queue:
+            buy = buy_queue[0]
+            matched_qty = min(sell_qty, buy['qty'])
+            pnl += matched_qty * (sell_price - buy['price'])
+            sell_qty -= matched_qty
+            buy['qty'] -= matched_qty
+
+            if buy['qty'] == 0:
+                buy_queue.pop(0)
+
+        pnl -= sell_fee
+
+    return pnl
 
 def calculate_win_loss_ratio(trades):
     buy_trades = [t for t in trades if t['isBuyer']]
     sell_trades = [t for t in trades if not t['isBuyer']]
+    buy_queue = []
+
+    for buy in buy_trades:
+        buy_queue.append({
+            "qty": float(buy['qty']),
+            "price": float(buy['price'])
+        })
+
     wins = 0
     losses = 0
     for sell in sell_trades:
+        sell_qty = float(sell['qty'])
         sell_price = float(sell['price'])
-        buy_prices = [float(buy['price']) for buy in buy_trades if buy['time'] < sell['time']]
-        avg_buy_price = sum(buy_prices) / len(buy_prices) if buy_prices else 0
-        if sell_price > avg_buy_price:
-            wins += 1
-        else:
-            losses += 1
+
+        while sell_qty > 0 and buy_queue:
+            buy = buy_queue[0]
+            matched_qty = min(sell_qty, buy['qty'])
+            if sell_price > buy['price']:
+                wins += 1
+            else:
+                losses += 1
+            sell_qty -= matched_qty
+            buy['qty'] -= matched_qty
+
+            if buy['qty'] == 0:
+                buy_queue.pop(0)
+
     win_loss_ratio = wins / losses if losses > 0 else float('inf')
     return wins, losses, win_loss_ratio
 
@@ -64,7 +106,7 @@ def generate_report(trades, period_name):
     total_trades = len(trades)
     total_volume = sum(float(t['qty']) * float(t['price']) for t in trades)
     total_fees = sum(float(t['commission']) for t in trades)
-    pnl = calculate_pnl(trades)
+    pnl = calculate_fifo_pnl(trades)
     wins, losses, win_loss_ratio = calculate_win_loss_ratio(trades)
 
     report = (
