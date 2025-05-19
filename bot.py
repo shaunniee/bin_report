@@ -234,7 +234,7 @@ if __name__ == "__main__":
         scheduler.add_job(send_monthly_report, 'cron', day=1, hour=1)
         scheduler.start()
 
-        await application.run_polling()
+        await application.run_polling(drop_pending_updates=True)
 
     asyncio.run(main())
 
