@@ -1,0 +1,5 @@
+pybit
+requests
+python-telegram-bot
+python-binance
+pymongo
