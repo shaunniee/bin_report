@@ -234,7 +234,7 @@ if __name__ == "__main__":
         scheduler.add_job(send_monthly_report, 'cron', day=1, hour=1)
         scheduler.start()
 
-        logger.info("✅ Bot is now polling for commands...")
         await application.run_polling()
 
     asyncio.run(main())
+
