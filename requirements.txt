@@ -3,3 +3,6 @@ requests
 python-telegram-bot
 python-binance
 pymongo
+apscheduler
+pandas
+openpyxl
