@@ -21,7 +21,6 @@ SYMBOL = "XRPUSDT"
 # === LOGGING ===
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-logger.info("🚀 Starting trading bot...")
 
 # === INIT ===
 client = Client(API_KEY, API_SECRET)
@@ -58,40 +57,56 @@ def log_trades_to_db(trades):
 
 def group_trades_by_order_id(trades):
     grouped = {}
-    try:
-        for trade in trades:
-            oid = trade["orderId"]
-            if oid not in grouped:
-                grouped[oid] = {
-                    "isBuyer": trade["isBuyer"],
-                    "qty": 0,
-                    "price_sum": 0,
-                    "commission": 0,
-                    "trades": []
-                }
-            grouped[oid]["qty"] += float(trade["qty"])
-            grouped[oid]["price_sum"] += float(trade["qty"]) * float(trade["price"])
-            grouped[oid]["commission"] += float(trade["commission"])
-            grouped[oid]["trades"].append(trade)
-        for g in grouped.values():
-            g["price"] = g["price_sum"] / g["qty"]
-    except Exception as e:
-        logger.error(f"Grouping error: {e}")
+    for trade in trades:
+        oid = trade["orderId"]
+        if oid not in grouped:
+            grouped[oid] = {
+                "isBuyer": trade["isBuyer"],
+                "qty": 0,
+                "price_sum": 0,
+                "commission": 0,
+                "trades": []
+            }
+        grouped[oid]["qty"] += float(trade["qty"])
+        grouped[oid]["price_sum"] += float(trade["qty"]) * float(trade["price"])
+        grouped[oid]["commission"] += float(trade["commission"])
+        grouped[oid]["trades"].append(trade)
+    for g in grouped.values():
+        g["price"] = g["price_sum"] / g["qty"]
     return grouped
 
-def calculate_fifo_pnl(trades):
+# === TELEGRAM COMMAND: YTD REPORT ===
+async def ytd_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
+        from_date = datetime.strptime(context.args[0], '%Y-%m-%d')
+        to_date = datetime.strptime(context.args[1], '%Y-%m-%d')
+
+        trades = list(trades_collection.find({
+            "timestamp": {"$gte": from_date, "$lt": to_date}
+        }))
+
+        if not trades:
+            await update.message.reply_text("⚠️ No trades found in the given date range.")
+            return
+
+        df = pd.DataFrame(trades)
+        df['trade_type'] = df['isBuyer'].apply(lambda x: 'BUY' if x else 'SELL')
+        df['timestamp'] = pd.to_datetime(df['time'], unit='ms')
+
         grouped = group_trades_by_order_id(trades)
         buys = [g for g in grouped.values() if g["isBuyer"]]
         sells = [g for g in grouped.values() if not g["isBuyer"]]
         buy_queue = []
-        pnl = 0
+        pnl_map = {}
+
         for b in buys:
             buy_queue.append({"qty": b["qty"], "price": b["price"], "fee": b["commission"]})
+
         for s in sells:
             sell_qty = s["qty"]
             sell_price = s["price"]
             sell_fee = s["commission"]
+            pnl = 0
             while sell_qty > 0 and buy_queue:
                 buy = buy_queue[0]
                 matched = min(sell_qty, buy["qty"])
@@ -101,139 +116,38 @@ def calculate_fifo_pnl(trades):
                 if buy["qty"] == 0:
                     buy_queue.pop(0)
             pnl -= sell_fee
-        return pnl
-    except Exception as e:
-        logger.error(f"PnL calculation error: {e}")
-    return 0
+            for trade in s["trades"]:
+                pnl_map[trade["id"]] = pnl / len(s["trades"])
 
-def calculate_win_loss_ratio(trades):
-    try:
-        grouped = group_trades_by_order_id(trades)
-        buys = [g for g in grouped.values() if g["isBuyer"]]
-        sells = [g for g in grouped.values() if not g["isBuyer"]]
-        buy_queue = []
-        wins = losses = 0
-        for b in buys:
-            buy_queue.append({"qty": b["qty"], "price": b["price"]})
-        for s in sells:
-            sell_qty = s["qty"]
-            sell_price = s["price"]
-            while sell_qty > 0 and buy_queue:
-                buy = buy_queue[0]
-                matched = min(sell_qty, buy["qty"])
-                if sell_price > buy["price"]:
-                    wins += 1
-                else:
-                    losses += 1
-                sell_qty -= matched
-                buy["qty"] -= matched
-                if buy["qty"] == 0:
-                    buy_queue.pop(0)
-        return wins, losses, wins / losses if losses > 0 else float("inf")
-    except Exception as e:
-        logger.error(f"Win/loss calculation error: {e}")
-    return 0, 0, 0
+        df["pnl"] = df["id"].map(pnl_map).fillna(0)
+        total_profits = df[df["pnl"] > 0]["pnl"].sum()
+        total_losses = df[df["pnl"] < 0]["pnl"].sum()
 
-def generate_report(trades, label):
-    try:
-        grouped = group_trades_by_order_id(trades)
-        total_trades = len(grouped)
-        total_volume = sum(g["qty"] * g["price"] for g in grouped.values())
-        total_fees = sum(g["commission"] for g in grouped.values())
-        pnl = calculate_fifo_pnl(trades)
-        wins, losses, ratio = calculate_win_loss_ratio(trades)
-        return (
-            f"📊 {label} Trading Report\n"
-            f"----------------------------------------\n"
-            f"🛒 Trades Executed: {total_trades}\n"
-            f"💰 Total Volume: {total_volume:.2f} USDT\n"
-            f"📈 Net PnL: {pnl:.2f} USDT\n"
-            f"💸 Total Fees: {total_fees:.2f} USDT\n"
-            f"✅ Wins: {wins} \n ❌ Losses: {losses}\n"
-            f"📊 Win/Loss Ratio: {ratio:.2f}\n"
-        )
-    except Exception as e:
-        logger.error(f"Report generation error: {e}")
-    return "⚠️ Failed to generate report."
+        filename = f"ytd_report_{from_date.strftime('%Y%m%d')}_{to_date.strftime('%Y%m%d')}.xlsx"
+        with pd.ExcelWriter(filename, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False, sheet_name='Trades')
+            worksheet = writer.sheets['Trades']
+            worksheet.write(len(df) + 1, 0, 'Total Profits')
+            worksheet.write(len(df) + 1, 1, total_profits)
+            worksheet.write(len(df) + 2, 0, 'Total Losses')
+            worksheet.write(len(df) + 2, 1, total_losses)
 
-def generate_monthly_report(trades, year, month):
-    try:
-        report = generate_report(trades, f"Monthly {year}-{month:02d}")
-        df = pd.DataFrame(trades)
-        filename = f"monthly_report_{year}_{month:02d}.xlsx"
-        df.to_excel(filename, index=False)
-        return report, filename
-    except Exception as e:
-        logger.error(f"Monthly report error: {e}")
-    return "⚠️ Failed to generate monthly report.", None
-# === SCHEDULED TASKS ===
-async def send_reports():
-    try:
-        now = datetime.utcnow()
-        start_day = datetime(now.year, now.month, now.day)
-        start_year = datetime(now.year, 1, 1)
-        daily = list(trades_collection.find({"timestamp": {"$gte": start_day}}))
-        ytd = list(trades_collection.find({"timestamp": {"$gte": start_year}}))
-        await send_telegram(generate_report(daily, "Daily"))
-        await send_telegram(generate_report(ytd, "YTD"))
-    except Exception as e:
-        logger.error(f"Scheduled report error: {e}")
+        await update.message.reply_document(document=open(filename, "rb"))
 
-async def send_monthly_report():
-    try:
-        now = datetime.utcnow()
-        start_month = datetime(now.year, now.month, 1)
-        end_last = start_month - timedelta(days=1)
-        start_last = datetime(end_last.year, end_last.month, 1)
-        trades = list(trades_collection.find({"timestamp": {"$gte": start_last, "$lt": start_month}}))
-        report, file = generate_monthly_report(trades, end_last.year, end_last.month)
-        await send_telegram(report, document=open(file, "rb"))
     except Exception as e:
-        logger.error(f"Monthly report error: {e}")
+        await update.message.reply_text("⚠️ Failed to generate YTD report.")
 
-# === TELEGRAM COMMANDS ===
-async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        trades = fetch_trades()
-        log_trades_to_db(trades)
-        await send_reports()
-    except Exception as e:
-        logger.error(f"/report command error: {e}")
-        await update.message.reply_text("⚠️ Failed to generate report.")
-
-async def monthly_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        year = int(context.args[0])
-        month = int(context.args[1])
-        start = datetime(year, month, 1)
-        end = datetime(year + (month // 12), (month % 12) + 1, 1)
-        trades = list(trades_collection.find({"timestamp": {"$gte": start, "$lt": end}}))
-        report, file = generate_monthly_report(trades, year, month)
-        await send_telegram(report, document=open(file, "rb"))
-    except Exception as e:
-        logger.error(f"/monthly_report command error: {e}")
-        await update.message.reply_text("⚠️ Failed to generate monthly report.")
-
+# === MAIN ===
 if __name__ == "__main__":
-    import nest_asyncio
-    import asyncio
-
     nest_asyncio.apply()
 
     async def main():
         application = Application.builder().token(TELEGRAM_TOKEN).build()
+        application.add_handler(CommandHandler("ytd_report", ytd_report_command))
 
-        # Add command handlers
-        application.add_handler(CommandHandler("report", report_command))
-        application.add_handler(CommandHandler("monthly_report", monthly_report_command))
-
-        # Set up and start the scheduler
         scheduler = AsyncIOScheduler()
-        scheduler.add_job(send_reports, 'cron', hour=0, minute=0)
-        scheduler.add_job(send_monthly_report, 'cron', day=1, hour=1)
         scheduler.start()
 
-        logger.info("✅ Bot is now polling for commands...")
         await application.run_polling()
 
     asyncio.run(main())
