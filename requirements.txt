@@ -7,3 +7,4 @@ apscheduler
 pandas
 openpyxl
 nest_asyncio
+python-telegram-bot==20.6
