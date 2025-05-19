@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from pymongo import MongoClient
 from binance.client import Client
 from binance.enums import *
-from telegram import Update, Bot
+from telegram import Update, Bot, InputFile
 from telegram.ext import Application, CommandHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -72,6 +72,7 @@ def calculate_fifo_pnl(trades):
         pnl -= sell_fee
 
     return pnl
+
 def calculate_win_loss_ratio(trades):
     buy_trades = [t for t in trades if t['isBuyer']]
     sell_trades = [t for t in trades if not t['isBuyer']]
@@ -189,4 +190,7 @@ async def main():
 
 if __name__ == "__main__":
     import asyncio
-    asyncio.run(main())
+    try:
+        asyncio.get_running_loop().run_until_complete(main())
+    except RuntimeError:
+        asyncio.run(main())
