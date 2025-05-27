@@ -21,8 +21,8 @@ MONGO_URI = os.getenv("MONGO_URI")
 
 # MongoDB setup
 client = pymongo.MongoClient(MONGO_URI)
-db = client["Positions"]
-positions_collection = db["Positions"]
+db = client["tradingbot"]
+positions_collection = db["positions"]
 
 # Binance testnet setup
 exchange = ccxt.binance({
@@ -96,7 +96,7 @@ def get_balance(asset="USDT"):
     return balance[asset]["free"]
 
 # Trade logic
-def trade_symbol(symbol, base_asset="USDT"):
+def trade_symbol(symbol, per_trade_usdt, base_asset="USDT"):
     if symbol in active_trades:
         print(f"Trade already active for {symbol}. Skipping.")
         return
@@ -113,55 +113,51 @@ def trade_symbol(symbol, base_asset="USDT"):
         df = apply_indicators(df)
 
         if should_buy(df):
-            usdt_balance = get_balance(base_asset)
-            if usdt_balance > 10:
-                amount = (usdt_balance * 0.98/4) / df["close"].iloc[-1]
-                amount = round(amount, 5)
-                order = execute_trade(symbol, "buy", amount)
-                buy_price = df["close"].iloc[-1]
-                stop_loss = buy_price * 0.994
-                take_profit = buy_price * 1.012
+            amount = per_trade_usdt / df["close"].iloc[-1]
+            amount = round(amount, 5)
+            order = execute_trade(symbol, "buy", amount)
+            buy_price = df["close"].iloc[-1]
+            stop_loss = buy_price * 0.994
+            take_profit = buy_price * 1.012
 
-                position = {
-                    "symbol": symbol,
-                    "amount": amount,
-                    "buy_price": buy_price,
-                    "stop_loss": stop_loss,
-                    "take_profit": take_profit,
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }
-                save_position(symbol, position)
+            position = {
+                "symbol": symbol,
+                "amount": amount,
+                "buy_price": buy_price,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+            save_position(symbol, position)
 
-                send_telegram(f"📈 {symbol} Buy @ {buy_price:.2f} | TP: {take_profit:.2f}, SL: {stop_loss:.2f}")
+            send_telegram(f"📈 {symbol} Buy @ {buy_price:.2f} | TP: {take_profit:.2f}, SL: {stop_loss:.2f}")
 
-                start_time = datetime.now(timezone.utc)
-                while True:
-                    df = fetch_ohlcv(symbol)
-                    df = apply_indicators(df)
-                    price = exchange.fetch_ticker(symbol)["last"]
+            start_time = datetime.now(timezone.utc)
+            while True:
+                df = fetch_ohlcv(symbol)
+                df = apply_indicators(df)
+                price = exchange.fetch_ticker(symbol)["last"]
 
-                    if price >= take_profit:
-                        execute_trade(symbol, "sell", amount)
-                        send_telegram(f"✅ {symbol} TP Hit: Sold @ {price:.2f}")
-                        break
-                    elif price <= stop_loss:
-                        execute_trade(symbol, "sell", amount)
-                        send_telegram(f"🛑 {symbol} SL Hit: Sold @ {price:.2f}")
-                        break
-                    elif should_sell(df, buy_price):
-                        execute_trade(symbol, "sell", amount)
-                        send_telegram(f"🔻 {symbol} Sell Signal: Sold @ {price:.2f}")
-                        break
-                    elif datetime.now(timezone.utc) > start_time + timedelta(minutes=45):
-                        execute_trade(symbol, "sell", amount)
-                        send_telegram(f"⏳ {symbol} Timeout: Sold @ {price:.2f}")
-                        break
+                if price >= take_profit:
+                    execute_trade(symbol, "sell", amount)
+                    send_telegram(f"✅ {symbol} TP Hit: Sold @ {price:.2f}")
+                    break
+                elif price <= stop_loss:
+                    execute_trade(symbol, "sell", amount)
+                    send_telegram(f"🛑 {symbol} SL Hit: Sold @ {price:.2f}")
+                    break
+                elif should_sell(df, buy_price):
+                    execute_trade(symbol, "sell", amount)
+                    send_telegram(f"🔻 {symbol} Sell Signal: Sold @ {price:.2f}")
+                    break
+                elif datetime.now(timezone.utc) > start_time + timedelta(hours=2):
+                    execute_trade(symbol, "sell", amount)
+                    send_telegram(f"⏳ {symbol} Timeout (2h): Sold @ {price:.2f}")
+                    break
 
-                    time.sleep(30)
+                time.sleep(30)
 
-                delete_position(symbol)
-            else:
-                print(f"Not enough {base_asset} balance for {symbol}.")
+            delete_position(symbol)
         else:
             print(f"No buy signal for {symbol}.")
     except Exception as e:
@@ -172,10 +168,12 @@ def trade_symbol(symbol, base_asset="USDT"):
 # Run bot
 def run_bot():
     symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT"]
+    usdt_balance = get_balance("USDT")
+    per_trade_usdt = (usdt_balance * 0.98) / len(symbols)
     threads = []
 
     for symbol in symbols:
-        thread = threading.Thread(target=trade_symbol, args=(symbol,))
+        thread = threading.Thread(target=trade_symbol, args=(symbol, per_trade_usdt))
         thread.start()
         threads.append(thread)
 
