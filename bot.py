@@ -1,5 +1,6 @@
 import os
 import ccxt
+import math
 import time
 import pymongo
 import pandas as pd
