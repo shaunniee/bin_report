@@ -174,7 +174,9 @@ def fetch_price(symbol):
     return exchange.fetch_ticker(symbol)["last"]
 
 def get_precision(symbol):
-    return markets[symbol]["precision"]["amount"]
+    precision_value = markets[symbol]["precision"]["amount"]  # e.g., 0.001
+    return abs(int(round(-1 * (math.log10(precision_value)))))  # Returns 3 for 0.001
+
 
 def send_telegram(message):
     try:
