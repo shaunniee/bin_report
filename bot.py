@@ -12,6 +12,7 @@ from ta.volatility import AverageTrueRange
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 
+
 # Load environment variables
 load_dotenv()
 API_KEY = os.getenv("BINANCE_API_KEY")
@@ -26,6 +27,8 @@ db = client["tradingbot"]
 positions_collection = db["positions"]
 active_collection = db["active_trades"]
 trade_logs_collection = db["trade_logs"]
+from logger import init_logger,log_skipped_signal,log_successful_buy,log_trade_pnl,summarize_skipped_signals,weekly_signal_summary
+init_logger(db)
 
 # Binance testnet setup
 exchange = ccxt.binance({
@@ -189,6 +192,7 @@ def log_trade(symbol, side, amount, price, pnl):
         "pnl": pnl,
         "timestamp": datetime.now(timezone.utc).isoformat()
     })
+    log_trade_pnl(symbol,exit_price=price,pnl=pnl)
 
 def trade_symbol(symbol, per_trade_usdt, base_asset="USDT"):
     if is_trade_active(symbol):
@@ -210,8 +214,9 @@ def trade_symbol(symbol, per_trade_usdt, base_asset="USDT"):
 
         df = fetch_ohlcv(symbol)
         df = apply_indicators(df)
-
+        should_buy_flag,passed_reasons,skip_reasons=should_buy(df)
         if should_buy(df) and confirm_higher_timeframe(symbol):
+            log_successfull_buy(symbol,passed_reasons)
             precision = get_precision(symbol)
             amount = round(per_trade_usdt / df["close"].iloc[-1], precision)
             order = execute_trade(symbol, "buy", amount)
@@ -284,7 +289,15 @@ def trade_symbol(symbol, per_trade_usdt, base_asset="USDT"):
             delete_position(symbol)
 
         else:
-            print(f"No buy signal for {symbol}.")
+            if not should_buy_flag:
+                msg = f"⚠️ Skipped {symbol} - No Buy Signal.\nReasons:\n- " + "\n- ".join(skip_reasons)
+                send_telegram(msg)
+                log_skipped_signal(symbol, skip_reasons)
+            else:
+                msg = f"⚠️ Skipped {symbol} - Higher timeframe not confirmed (15m EMA9 ≤ EMA21)"
+                send_telegram(msg)
+                log_skipped_signal(symbol, ["Higher timeframe not confirmed (15m EMA9 ≤ EMA21)"])
+
     except Exception as e:
         send_telegram(f"⚠️ Error with {symbol}: {str(e)}")
     finally:
@@ -295,6 +308,9 @@ def run_bot():
     usdt_balance = get_balance("USDT")
     per_trade_usdt = (usdt_balance * 0.98) / len(symbols)
     threads = []
+    if datetime.utcnow().weekday() == 6:  # Run on Sundays
+        send_telegram(summarize_skipped_signals())
+        send_telegram(weekly_signal_summary())
     for symbol in symbols:
         thread = threading.Thread(target=trade_symbol, args=(symbol, per_trade_usdt))
         thread.start()
