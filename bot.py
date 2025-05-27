@@ -249,7 +249,7 @@ def trade_symbol(symbol, per_trade_usdt, base_asset="USDT"):
         df = apply_indicators(df)
         should_buy_flag,passed_reasons,skip_reasons=should_buy(df)
         if should_buy(df) and confirm_higher_timeframe(symbol):
-            log_successfull_buy(symbol,passed_reasons)
+            log_successful_buy(symbol,passed_reasons)
             precision = get_precision(symbol)
             amount = round(per_trade_usdt / df["close"].iloc[-1], precision)
             order = execute_trade(symbol, "buy", amount)
