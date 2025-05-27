@@ -6,11 +6,13 @@ import pandas as pd
 import requests
 import threading
 import functools
+import traceback
 from ta.trend import EMAIndicator, MACD, ADXIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import AverageTrueRange
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
+
 
 
 # Load environment variables
@@ -332,8 +334,10 @@ def trade_symbol(symbol, per_trade_usdt, base_asset="USDT"):
                 log_skipped_signal(symbol, ["Higher timeframe not confirmed (15m EMA9 ≤ EMA21)"])
 
     except Exception as e:
-        print(e)
-        send_telegram(f"⚠️ Error with {symbol}: {str(e)}")
+        error_msg = f"⚠️ Error with {symbol}: {str(e)}\n\nTrace:\n{traceback.format_exc()}"
+        print(error_msg)
+        send_telegram(error_msg)
+
     finally:
         unmark_trade_active(symbol)
 
