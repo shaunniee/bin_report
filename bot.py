@@ -1,6 +1,7 @@
 import os
 import ccxt
 import time
+import json
 import pandas as pd
 import requests
 import threading
@@ -17,7 +18,6 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Check for missing environment variables
 if not all([API_KEY, API_SECRET, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]):
     raise EnvironmentError("Missing one or more required environment variables.")
 
@@ -30,19 +30,34 @@ exchange = ccxt.binance({
 })
 exchange.set_sandbox_mode(True)
 
+# Globals
+active_trades = set()
+POSITIONS_FILE = "positions.json"
+
 # Telegram alert function
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message})
 
-# Fetch recent OHLCV data
+# Load and save positions
+def load_positions():
+    if os.path.exists(POSITIONS_FILE):
+        with open(POSITIONS_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_positions(positions):
+    with open(POSITIONS_FILE, "w") as f:
+        json.dump(positions, f, indent=4)
+
+# Fetch OHLCV data
 def fetch_ohlcv(symbol="BTC/USDT", timeframe='5m', limit=100):
     data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
     df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
     return df
 
-# Apply technical indicators
+# Apply indicators
 def apply_indicators(df):
     df["EMA9"] = EMAIndicator(close=df["close"], window=9).ema_indicator()
     df["EMA21"] = EMAIndicator(close=df["close"], window=21).ema_indicator()
@@ -51,7 +66,7 @@ def apply_indicators(df):
     df["VWAP"] = (df["volume"] * (df["high"] + df["low"] + df["close"]) / 3).cumsum() / df["volume"].cumsum()
     return df
 
-# Check buy conditions
+# Buy condition
 def should_buy(df):
     latest = df.iloc[-1]
     return (
@@ -60,30 +75,50 @@ def should_buy(df):
         latest["close"] > latest["VWAP"]
     )
 
-# Execute market trade
+# Execute trade
 def execute_trade(symbol, side, amount):
     return exchange.create_market_order(symbol, side, amount)
 
-# Get available USDT balance
+# Get balance
 def get_balance(asset="USDT"):
     balance = exchange.fetch_balance()
     return balance[asset]["free"]
 
-# Trading logic for a single symbol
+# Trade logic
 def trade_symbol(symbol, base_asset="USDT"):
+    if symbol in active_trades:
+        print(f"Trade already active for {symbol}. Skipping.")
+        return
+
+    active_trades.add(symbol)
+    positions = load_positions()
+
     try:
+        if symbol in positions:
+            print(f"Position already open for {symbol}. Skipping.")
+            return
+
         df = fetch_ohlcv(symbol)
         df = apply_indicators(df)
 
         if should_buy(df):
             usdt_balance = get_balance(base_asset)
             if usdt_balance > 10:
-                amount = (usdt_balance * 0.98 / 2) / df["close"].iloc[-1]  # Divide by 2 for BTC and ETH
+                amount = (usdt_balance * 0.98) / df["close"].iloc[-1]
                 amount = round(amount, 5)
                 order = execute_trade(symbol, "buy", amount)
                 buy_price = df["close"].iloc[-1]
                 stop_loss = buy_price * 0.994
                 take_profit = buy_price * 1.012
+
+                positions[symbol] = {
+                    "amount": amount,
+                    "buy_price": buy_price,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+                save_positions(positions)
 
                 send_telegram(f"📈 {symbol} Buy @ {buy_price:.2f} | TP: {take_profit:.2f}, SL: {stop_loss:.2f}")
 
@@ -103,16 +138,22 @@ def trade_symbol(symbol, base_asset="USDT"):
                         send_telegram(f"⏳ {symbol} Timeout: Sold @ {price:.2f}")
                         break
                     time.sleep(30)
+
+                # Remove position after trade closes
+                positions.pop(symbol, None)
+                save_positions(positions)
             else:
                 print(f"Not enough {base_asset} balance for {symbol}.")
         else:
             print(f"No buy signal for {symbol}.")
     except Exception as e:
         send_telegram(f"⚠️ Error with {symbol}: {str(e)}")
+    finally:
+        active_trades.remove(symbol)
 
-# Run the bot with threading
+# Run bot
 def run_bot():
-    symbols = ["BTC/USDT", "ETH/USDT"]
+    symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT"]
     threads = []
 
     for symbol in symbols:
@@ -123,7 +164,7 @@ def run_bot():
     for thread in threads:
         thread.join()
 
-# Run the bot continuously
+# Continuous loop
 while True:
     run_bot()
     time.sleep(300)  # 5 minutes
