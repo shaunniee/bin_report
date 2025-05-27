@@ -1,7 +1,7 @@
 import os
 import ccxt
 import time
-import json
+import pymongo
 import pandas as pd
 import requests
 import threading
@@ -17,9 +17,12 @@ API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+MONGO_URI = os.getenv("MONGO_URI")
 
-if not all([API_KEY, API_SECRET, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]):
-    raise EnvironmentError("Missing one or more required environment variables.")
+# MongoDB setup
+client = pymongo.MongoClient(MONGO_URI)
+db = client.get_database()
+positions_collection = db["positions"]
 
 # Binance testnet setup
 exchange = ccxt.binance({
@@ -32,23 +35,21 @@ exchange.set_sandbox_mode(True)
 
 # Globals
 active_trades = set()
-POSITIONS_FILE = "positions.json"
 
 # Telegram alert function
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message})
 
-# Load and save positions
+# MongoDB position functions
 def load_positions():
-    if os.path.exists(POSITIONS_FILE):
-        with open(POSITIONS_FILE, "r") as f:
-            return json.load(f)
-    return {}
+    return {pos["symbol"]: pos for pos in positions_collection.find()}
 
-def save_positions(positions):
-    with open(POSITIONS_FILE, "w") as f:
-        json.dump(positions, f, indent=4)
+def save_position(symbol, position):
+    positions_collection.update_one({"symbol": symbol}, {"$set": position}, upsert=True)
+
+def delete_position(symbol):
+    positions_collection.delete_one({"symbol": symbol})
 
 # Fetch OHLCV data
 def fetch_ohlcv(symbol="BTC/USDT", timeframe='5m', limit=100):
@@ -73,6 +74,16 @@ def should_buy(df):
         latest["EMA9"] > latest["EMA21"] and
         40 < latest["RSI"] < 70 and
         latest["close"] > latest["VWAP"]
+    )
+
+# Sell condition
+def should_sell(df, entry_price):
+    latest = df.iloc[-1]
+    return (
+        latest["EMA9"] < latest["EMA21"] or
+        latest["RSI"] > 70 or
+        latest["close"] < latest["VWAP"] or
+        latest["close"] < entry_price - 1.5 * latest["ATR"]
     )
 
 # Execute trade
@@ -104,27 +115,31 @@ def trade_symbol(symbol, base_asset="USDT"):
         if should_buy(df):
             usdt_balance = get_balance(base_asset)
             if usdt_balance > 10:
-                amount = (usdt_balance * 0.98) / df["close"].iloc[-1]
+                amount = (usdt_balance * 0.98/4) / df["close"].iloc[-1]
                 amount = round(amount, 5)
                 order = execute_trade(symbol, "buy", amount)
                 buy_price = df["close"].iloc[-1]
                 stop_loss = buy_price * 0.994
                 take_profit = buy_price * 1.012
 
-                positions[symbol] = {
+                position = {
+                    "symbol": symbol,
                     "amount": amount,
                     "buy_price": buy_price,
                     "stop_loss": stop_loss,
                     "take_profit": take_profit,
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 }
-                save_positions(positions)
+                save_position(symbol, position)
 
                 send_telegram(f"📈 {symbol} Buy @ {buy_price:.2f} | TP: {take_profit:.2f}, SL: {stop_loss:.2f}")
 
                 start_time = datetime.now(timezone.utc)
                 while True:
+                    df = fetch_ohlcv(symbol)
+                    df = apply_indicators(df)
                     price = exchange.fetch_ticker(symbol)["last"]
+
                     if price >= take_profit:
                         execute_trade(symbol, "sell", amount)
                         send_telegram(f"✅ {symbol} TP Hit: Sold @ {price:.2f}")
@@ -133,15 +148,18 @@ def trade_symbol(symbol, base_asset="USDT"):
                         execute_trade(symbol, "sell", amount)
                         send_telegram(f"🛑 {symbol} SL Hit: Sold @ {price:.2f}")
                         break
+                    elif should_sell(df, buy_price):
+                        execute_trade(symbol, "sell", amount)
+                        send_telegram(f"🔻 {symbol} Sell Signal: Sold @ {price:.2f}")
+                        break
                     elif datetime.now(timezone.utc) > start_time + timedelta(minutes=45):
                         execute_trade(symbol, "sell", amount)
                         send_telegram(f"⏳ {symbol} Timeout: Sold @ {price:.2f}")
                         break
+
                     time.sleep(30)
 
-                # Remove position after trade closes
-                positions.pop(symbol, None)
-                save_positions(positions)
+                delete_position(symbol)
             else:
                 print(f"Not enough {base_asset} balance for {symbol}.")
         else:
