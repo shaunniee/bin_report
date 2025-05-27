@@ -267,35 +267,30 @@ def trade_symbol(symbol, per_trade_usdt, base_asset="USDT"):
                     execute_trade(symbol, "sell", amount)
                     pnl = (price - buy_price) * amount
                     send_telegram(f"✅ {symbol} TP Hit (resumed): Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    log_trade(symbol, "sell", amount, price, pnl)
                     sold = True
         
                 elif price <= stop_loss:
                     execute_trade(symbol, "sell", amount)
                     pnl = (price - buy_price) * amount
                     send_telegram(f"🛑 {symbol} SL Hit (resumed): Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    log_trade(symbol, "sell", amount, price, pnl)
                     sold = True
         
                 elif price <= trailing_stop:
                     execute_trade(symbol, "sell", amount)
                     pnl = (price - buy_price) * amount
                     send_telegram(f"🔻 {symbol} Trailing Stop Hit (resumed): Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    log_trade(symbol, "sell", amount, price, pnl)
                     sold = True
         
                 elif should_sell(df, buy_price):
                     execute_trade(symbol, "sell", amount)
                     pnl = (price - buy_price) * amount
                     send_telegram(f"🔻 {symbol} Sell Signal (resumed): Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    log_trade(symbol, "sell", amount, price, pnl)
                     sold = True
         
                 elif datetime.now(timezone.utc) > start_time + timedelta(hours=2):
                     execute_trade(symbol, "sell", amount)
                     pnl = (price - buy_price) * amount
                     send_telegram(f"⏳ {symbol} Timeout (resumed): Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    log_trade(symbol, "sell", amount, price, pnl)
                     sold = True
         
                 time.sleep(30)
@@ -344,35 +339,30 @@ def trade_symbol(symbol, per_trade_usdt, base_asset="USDT"):
                     execute_trade(symbol, "sell", amount)
                     pnl = (price - buy_price) * amount
                     send_telegram(f"✅ {symbol} TP Hit: Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    log_trade(symbol, "sell", amount, price, pnl)
                     sold = True
 
                 elif price <= stop_loss:
                     execute_trade(symbol, "sell", amount)
                     pnl = (price - buy_price) * amount
                     send_telegram(f"🛑 {symbol} SL Hit: Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    log_trade(symbol, "sell", amount, price, pnl)
                     sold = True
 
                 elif price <= trailing_stop:
                     execute_trade(symbol, "sell", amount)
                     pnl = (price - buy_price) * amount
                     send_telegram(f"🔻 {symbol} Trailing Stop Hit: Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    log_trade(symbol, "sell", amount, price, pnl)
                     sold = True
 
                 elif should_sell(df, buy_price):
                     execute_trade(symbol, "sell", amount)
                     pnl = (price - buy_price) * amount
                     send_telegram(f"🔻 {symbol} Sell Signal: Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    log_trade(symbol, "sell", amount, price, pnl)
                     sold = True
 
                 elif datetime.now(timezone.utc) > start_time + timedelta(hours=2):
                     execute_trade(symbol, "sell", amount)
                     pnl = (price - buy_price) * amount
                     send_telegram(f"⏳ {symbol} Timeout (2h): Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    log_trade(symbol, "sell", amount, price, pnl)
                     sold = True
 
                 time.sleep(30)
