@@ -8,3 +8,10 @@ pandas
 openpyxl
 nest_asyncio
 python-telegram-bot==20.6
+ccxt
+pandas
+numpy
+ta
+python-dotenv
+
+
