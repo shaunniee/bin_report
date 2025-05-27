@@ -98,15 +98,48 @@ def should_buy(df):
     latest = df.iloc[-1]
     regime = detect_market_regime(df)
     rsi_lower, rsi_upper = get_adaptive_rsi_bounds(df)
-    return (
-        regime == "trending"
-        and latest["EMA9"] > latest["EMA21"]
-        and rsi_lower < latest["RSI"] < rsi_upper
-        and latest["close"] > latest["VWAP"]
-        and latest["ADX"] > 20
-        and latest["Volume_Spike"]
-        and latest["OBV"] > df["OBV"].iloc[-2]
-    )
+
+    passed = []
+    failed = []
+
+    if regime == "trending":
+        passed.append("Regime: trending (ADX > 25)")
+    else:
+        failed.append("Regime: not trending (ADX ≤ 25)")
+
+    if latest["EMA9"] > latest["EMA21"]:
+        passed.append("EMA: EMA9 > EMA21")
+    else:
+        failed.append("EMA: EMA9 ≤ EMA21")
+
+    if rsi_lower < latest["RSI"] < rsi_upper:
+        passed.append(f"RSI in bounds: {latest['RSI']:.2f}")
+    else:
+        failed.append(f"RSI out of bounds: {latest['RSI']:.2f} not in ({rsi_lower}, {rsi_upper})")
+
+    if latest["close"] > latest["VWAP"]:
+        passed.append("Close > VWAP")
+    else:
+        failed.append("Close ≤ VWAP")
+
+    if latest["ADX"] > 20:
+        passed.append("ADX > 20")
+    else:
+        failed.append("ADX ≤ 20")
+
+    if latest["Volume_Spike"]:
+        passed.append("Volume spike detected")
+    else:
+        failed.append("No volume spike")
+
+    if latest["OBV"] > df["OBV"].iloc[-2]:
+        passed.append("OBV increasing")
+    else:
+        failed.append("OBV not increasing")
+
+    should_buy = len(failed) == 0
+    return should_buy, passed, failed
+
 
 def should_sell(df, entry_price):
     latest = df.iloc[-1]
