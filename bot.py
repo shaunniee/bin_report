@@ -332,6 +332,7 @@ def trade_symbol(symbol, per_trade_usdt, base_asset="USDT"):
                 log_skipped_signal(symbol, ["Higher timeframe not confirmed (15m EMA9 ≤ EMA21)"])
 
     except Exception as e:
+        print(e)
         send_telegram(f"⚠️ Error with {symbol}: {str(e)}")
     finally:
         unmark_trade_active(symbol)
