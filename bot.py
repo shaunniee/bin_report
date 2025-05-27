@@ -171,7 +171,7 @@ def is_in_cooldown(symbol, cooldown_minutes=60):
     pos = positions_collection.find_one({"symbol": symbol})
     if pos and "last_closed" in pos:
         last_closed = datetime.fromisoformat(pos["last_closed"])
-               return datetime.now(timezone.utc) < last_closed + timedelta(minutes=cooldown_minutes)
+        return datetime.now(timezone.utc) < last_closed + timedelta(minutes=cooldown_minutes)
     return False
 
 def confirm_higher_timeframe(symbol):
