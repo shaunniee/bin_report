@@ -8,7 +8,7 @@ from ta.trend import EMAIndicator
 from ta.momentum import RSIIndicator
 from ta.volatility import AverageTrueRange
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # Load environment variables
 load_dotenv()
@@ -87,7 +87,7 @@ def trade_symbol(symbol, base_asset="USDT"):
 
                 send_telegram(f"📈 {symbol} Buy @ {buy_price:.2f} | TP: {take_profit:.2f}, SL: {stop_loss:.2f}")
 
-                start_time = datetime.utcnow()
+                start_time = datetime.now(timezone.utc)
                 while True:
                     price = exchange.fetch_ticker(symbol)["last"]
                     if price >= take_profit:
@@ -98,7 +98,7 @@ def trade_symbol(symbol, base_asset="USDT"):
                         execute_trade(symbol, "sell", amount)
                         send_telegram(f"🛑 {symbol} SL Hit: Sold @ {price:.2f}")
                         break
-                    elif datetime.utcnow() > start_time + timedelta(minutes=45):
+                    elif datetime.now(timezone.utc) > start_time + timedelta(minutes=45):
                         execute_trade(symbol, "sell", amount)
                         send_telegram(f"⏳ {symbol} Timeout: Sold @ {price:.2f}")
                         break
