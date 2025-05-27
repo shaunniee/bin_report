@@ -2,12 +2,11 @@ import os
 import ccxt
 import time
 import pandas as pd
-import numpy as np
 import requests
-from ta.trend import ema_indicator
-from ta.momentum import rsi
-from ta.volatility import average_true_range
-from ta.volume import volume_weighted_average_price as vwap
+import threading
+from ta.trend import EMAIndicator
+from ta.momentum import RSIIndicator
+from ta.volatility import AverageTrueRange
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 
@@ -17,6 +16,10 @@ API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+# Check for missing environment variables
+if not all([API_KEY, API_SECRET, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]):
+    raise EnvironmentError("Missing one or more required environment variables.")
 
 # Binance testnet setup
 exchange = ccxt.binance({
@@ -41,11 +44,11 @@ def fetch_ohlcv(symbol="BTC/USDT", timeframe='5m', limit=100):
 
 # Apply technical indicators
 def apply_indicators(df):
-    df["EMA9"] = ema_indicator(df["close"], window=9)
-    df["EMA21"] = ema_indicator(df["close"], window=21)
-    df["RSI"] = rsi(df["close"], window=14)
-    df["VWAP"] = vwap(df["high"], df["low"], df["close"], df["volume"])
-    df["ATR"] = average_true_range(df["high"], df["low"], df["close"], window=14)
+    df["EMA9"] = EMAIndicator(close=df["close"], window=9).ema_indicator()
+    df["EMA21"] = EMAIndicator(close=df["close"], window=21).ema_indicator()
+    df["RSI"] = RSIIndicator(close=df["close"], window=14).rsi()
+    df["ATR"] = AverageTrueRange(high=df["high"], low=df["low"], close=df["close"], window=14).average_true_range()
+    df["VWAP"] = (df["volume"] * (df["high"] + df["low"] + df["close"]) / 3).cumsum() / df["volume"].cumsum()
     return df
 
 # Check buy conditions
@@ -66,50 +69,59 @@ def get_balance(asset="USDT"):
     balance = exchange.fetch_balance()
     return balance[asset]["free"]
 
-# Bot logic for multiple symbols
+# Trading logic for a single symbol
+def trade_symbol(symbol, base_asset="USDT"):
+    try:
+        df = fetch_ohlcv(symbol)
+        df = apply_indicators(df)
+
+        if should_buy(df):
+            usdt_balance = get_balance(base_asset)
+            if usdt_balance > 10:
+                amount = (usdt_balance * 0.98 / 2) / df["close"].iloc[-1]  # Divide by 2 for BTC and ETH
+                amount = round(amount, 5)
+                order = execute_trade(symbol, "buy", amount)
+                buy_price = df["close"].iloc[-1]
+                stop_loss = buy_price * 0.994
+                take_profit = buy_price * 1.012
+
+                send_telegram(f"📈 {symbol} Buy @ {buy_price:.2f} | TP: {take_profit:.2f}, SL: {stop_loss:.2f}")
+
+                start_time = datetime.utcnow()
+                while True:
+                    price = exchange.fetch_ticker(symbol)["last"]
+                    if price >= take_profit:
+                        execute_trade(symbol, "sell", amount)
+                        send_telegram(f"✅ {symbol} TP Hit: Sold @ {price:.2f}")
+                        break
+                    elif price <= stop_loss:
+                        execute_trade(symbol, "sell", amount)
+                        send_telegram(f"🛑 {symbol} SL Hit: Sold @ {price:.2f}")
+                        break
+                    elif datetime.utcnow() > start_time + timedelta(minutes=45):
+                        execute_trade(symbol, "sell", amount)
+                        send_telegram(f"⏳ {symbol} Timeout: Sold @ {price:.2f}")
+                        break
+                    time.sleep(30)
+            else:
+                print(f"Not enough {base_asset} balance for {symbol}.")
+        else:
+            print(f"No buy signal for {symbol}.")
+    except Exception as e:
+        send_telegram(f"⚠️ Error with {symbol}: {str(e)}")
+
+# Run the bot with threading
 def run_bot():
     symbols = ["BTC/USDT", "ETH/USDT"]
-    base_asset = "USDT"
+    threads = []
 
     for symbol in symbols:
-        try:
-            df = fetch_ohlcv(symbol)
-            df = apply_indicators(df)
+        thread = threading.Thread(target=trade_symbol, args=(symbol,))
+        thread.start()
+        threads.append(thread)
 
-            if should_buy(df):
-                usdt_balance = get_balance(base_asset)
-                if usdt_balance > 10:
-                    amount = (usdt_balance * 0.98 / len(symbols)) / df["close"].iloc[-1]
-                    amount = round(amount, 5)
-                    order = execute_trade(symbol, "buy", amount)
-                    buy_price = df["close"].iloc[-1]
-                    stop_loss = buy_price * 0.994
-                    take_profit = buy_price * 1.012
-
-                    send_telegram(f"📈 {symbol} Buy @ {buy_price:.2f} | TP: {take_profit:.2f}, SL: {stop_loss:.2f}")
-
-                    start_time = datetime.utcnow()
-                    while True:
-                        price = exchange.fetch_ticker(symbol)["last"]
-                        if price >= take_profit:
-                            execute_trade(symbol, "sell", amount)
-                            send_telegram(f"✅ {symbol} TP Hit: Sold @ {price:.2f}")
-                            break
-                        elif price <= stop_loss:
-                            execute_trade(symbol, "sell", amount)
-                            send_telegram(f"🛑 {symbol} SL Hit: Sold @ {price:.2f}")
-                            break
-                        elif datetime.utcnow() > start_time + timedelta(minutes=45):
-                            execute_trade(symbol, "sell", amount)
-                            send_telegram(f"⏳ {symbol} Timeout: Sold @ {price:.2f}")
-                            break
-                        time.sleep(30)
-                else:
-                    print(f"Not enough {base_asset} balance for {symbol}.")
-            else:
-                print(f"No buy signal for {symbol}.")
-        except Exception as e:
-            send_telegram(f"⚠️ Error with {symbol}: {str(e)}")
+    for thread in threads:
+        thread.join()
 
 # Run the bot continuously
 while True:
