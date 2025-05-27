@@ -233,9 +233,6 @@ def log_trade(symbol, side, amount, price, pnl):
     log_trade_pnl(symbol,exit_price=price,pnl=pnl)
 
 def trade_symbol(symbol, per_trade_usdt, base_asset="USDT"):
-    if is_trade_active(symbol):
-        print(f"Trade already active for {symbol}. Skipping.")
-        return
     if is_in_cooldown(symbol):
         print(f"{symbol} is in cooldown. Skipping.")
         return
