@@ -21,8 +21,8 @@ MONGO_URI = os.getenv("MONGO_URI")
 
 # MongoDB setup
 client = pymongo.MongoClient(MONGO_URI)
-db = client.get_database()
-positions_collection = db["positions"]
+db = client["Positions"]
+positions_collection = db["Positions"]
 
 # Binance testnet setup
 exchange = ccxt.binance({
