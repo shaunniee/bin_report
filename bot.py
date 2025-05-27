@@ -247,9 +247,65 @@ def trade_symbol(symbol, per_trade_usdt, base_asset="USDT"):
     try:
         positions = load_positions()
         if symbol in positions:
-            print(f"Position already open for {symbol}. Skipping.")
-            return
-
+            position = positions[symbol]
+            print(f"🔄 Resuming existing trade for {symbol}...")
+        
+            amount = position["amount"]
+            buy_price = position["buy_price"]
+            stop_loss = position["stop_loss"]
+            take_profit = position["take_profit"]
+            trailing_stop = position.get("trailing_stop", buy_price - 1.0 * (buy_price * 0.015))
+        
+            start_time = datetime.now(timezone.utc)
+            sold = False
+        
+            while not sold:
+                df = fetch_ohlcv(symbol)
+                df = apply_indicators(df)
+                price = fetch_price(symbol)
+                atr = df["ATR"].iloc[-1]
+                trailing_stop = max(trailing_stop, price - 1.0 * atr)
+        
+                if price >= take_profit:
+                    execute_trade(symbol, "sell", amount)
+                    pnl = (price - buy_price) * amount
+                    send_telegram(f"✅ {symbol} TP Hit (resumed): Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
+                    log_trade(symbol, "sell", amount, price, pnl)
+                    sold = True
+        
+                elif price <= stop_loss:
+                    execute_trade(symbol, "sell", amount)
+                    pnl = (price - buy_price) * amount
+                    send_telegram(f"🛑 {symbol} SL Hit (resumed): Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
+                    log_trade(symbol, "sell", amount, price, pnl)
+                    sold = True
+        
+                elif price <= trailing_stop:
+                    execute_trade(symbol, "sell", amount)
+                    pnl = (price - buy_price) * amount
+                    send_telegram(f"🔻 {symbol} Trailing Stop Hit (resumed): Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
+                    log_trade(symbol, "sell", amount, price, pnl)
+                    sold = True
+        
+                elif should_sell(df, buy_price):
+                    execute_trade(symbol, "sell", amount)
+                    pnl = (price - buy_price) * amount
+                    send_telegram(f"🔻 {symbol} Sell Signal (resumed): Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
+                    log_trade(symbol, "sell", amount, price, pnl)
+                    sold = True
+        
+                elif datetime.now(timezone.utc) > start_time + timedelta(hours=2):
+                    execute_trade(symbol, "sell", amount)
+                    pnl = (price - buy_price) * amount
+                    send_telegram(f"⏳ {symbol} Timeout (resumed): Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
+                    log_trade(symbol, "sell", amount, price, pnl)
+                    sold = True
+        
+                time.sleep(30)
+        
+            delete_position(symbol)
+            unmark_trade_active(symbol)
+            return  # 🚨 Don't continue to new buy logic after resuming
         df = fetch_ohlcv(symbol)
         df = apply_indicators(df)
         should_buy_flag,passed_reasons,skip_reasons=should_buy(df)
