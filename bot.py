@@ -130,16 +130,6 @@ def should_buy(df):
     else:
         failed.append("ADX ≤ 20")
 
-    if latest["Volume_Spike"]:
-        passed.append("Volume spike detected")
-    else:
-        failed.append("No volume spike")
-
-    if latest["OBV"] > df["OBV"].iloc[-2]:
-        passed.append("OBV increasing")
-    else:
-        failed.append("OBV not increasing")
-
     should_buy = len(failed) == 0
     return should_buy, passed, failed
 
