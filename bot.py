@@ -136,6 +136,8 @@ def backtest_strategy(df, strategy_name, config):
 
     sl_hits = 0
     tp_hits = 0
+    profit_sl_hits = 0
+    loss_sl_hits = 0
     trailing_stop = None
 
     for i in range(1, len(df)-1):
@@ -154,8 +156,8 @@ def backtest_strategy(df, strategy_name, config):
             buy_price = row["close"]
             position = balance / buy_price
             balance = 0
-            trade_log.append((df.index[i], "BUY", buy_price))
-            
+            trade_log.append({"date": df.index[i], "type": "BUY", "price": buy_price})
+
             # Initialize trailing stop loss at initial stop loss level below buy price
             trailing_stop = buy_price * (1 - config["stop_loss_pct"])  # e.g. 2% below buy
 
@@ -175,26 +177,51 @@ def backtest_strategy(df, strategy_name, config):
             # Sell conditions
             if current_price >= buy_price * (1 + config["take_profit_pct"]):
                 balance = position * current_price
-                trade_log.append((df.index[i], "SELL_TP", current_price))
+                trade_log.append({"date": df.index[i], "type": "SELL_TP", "price": current_price})
                 position = 0
                 tp_hits += 1
                 trailing_stop = None
             elif current_price <= trailing_stop:
                 balance = position * current_price
-                trade_log.append((df.index[i], "SELL_SL", current_price))
+                trade_log.append({"date": df.index[i], "type": "SELL_SL", "price": current_price})
                 position = 0
                 sl_hits += 1
+                # Log profit or loss stop loss
+                if current_price > buy_price:
+                    profit_sl_hits += 1
+                else:
+                    loss_sl_hits += 1
                 trailing_stop = None
 
     # Close position at end if still open
     if position > 0:
         last_price = df["close"].iloc[-1]
         balance = position * last_price
-        trade_log.append((df.index[-1], "SELL_EOD", last_price))
+        trade_log.append({"date": df.index[-1], "type": "SELL_EOD", "price": last_price})
         position = 0
         trailing_stop = None
 
-    return balance, trade_log, sl_hits, tp_hits
+    return balance, trade_log, sl_hits, tp_hits, profit_sl_hits, loss_sl_hits
+
+def summarize_monthly_profit(trade_log):
+    # Calculate monthly profit from trades
+    monthly_profit = {}
+
+    # Trades should be in pairs: BUY followed by SELL
+    for i in range(0, len(trade_log)-1, 2):
+        buy = trade_log[i]
+        sell = trade_log[i+1]
+
+        # Profit for trade
+        profit = sell["price"] - buy["price"]
+
+        month_str = buy["date"].strftime("%Y-%m")
+        monthly_profit[month_str] = monthly_profit.get(month_str, 0) + profit
+
+    # Convert to sorted list
+    monthly_profit = dict(sorted(monthly_profit.items()))
+
+    return monthly_profit
 
 # --- MAIN ---
 def main():
@@ -208,27 +235,35 @@ def main():
 
     for strat in strategies:
         print(f"\nBacktesting strategy: {strat}")
-        final_balance, trades, sl_hits, tp_hits = backtest_strategy(df, strat, config)
+        final_balance, trades, sl_hits, tp_hits, profit_sl_hits, loss_sl_hits = backtest_strategy(df, strat, config)
         net_return_pct = ((final_balance - initial_balance) / initial_balance) * 100
-        num_trades = len([t for t in trades if t[1] == "BUY"])
+        num_trades = len([t for t in trades if t["type"] == "BUY"])
         print(f"Initial Balance: ${initial_balance}")
         print(f"Final Balance:   ${final_balance:.2f}")
         print(f"Net Return:      {net_return_pct:.2f}%")
         print(f"Total trades:    {num_trades}")
         print(f"Take-Profit hits: {tp_hits}")
         print(f"Stop-Loss hits:   {sl_hits}")
+        print(f"Profit Stop-Loss hits: {profit_sl_hits}")
+        print(f"Loss Stop-Loss hits:   {loss_sl_hits}")
+
+        monthly_profit = summarize_monthly_profit(trades)
+        print("Monthly profit (example):")
+        for month, profit in monthly_profit.items():
+            print(f"  {month}: {profit:.2f}")
 
         results.append({
             "strategy": strat,
-            "initial_balance": initial_balance,
             "final_balance": final_balance,
             "net_return_pct": net_return_pct,
-            "total_trades": num_trades,
-            "tp_hits": tp_hits,
-            "sl_hits": sl_hits,
+            "num_trades": num_trades,
+            "take_profit_hits": tp_hits,
+            "stop_loss_hits": sl_hits,
+            "profit_stop_loss_hits": profit_sl_hits,
+            "loss_stop_loss_hits": loss_sl_hits,
         })
 
-    print("\nAll done.")
+    return results
 
 if __name__ == "__main__":
     main()
