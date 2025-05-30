@@ -18,7 +18,7 @@ config = {
     "use_ema_rsi_vwap": True,
     "use_breakout_retest": True,
     "use_scalping_vwap": True,
-    "stop_loss_pct": 0.20,  # 2%
+    "stop_loss_pct": 0.22,  # 2%
     "take_profit_pct": 0.03,  # 3%
 }
 
@@ -128,8 +128,8 @@ def strategy_scalping_vwap(row, prev_row):
     rsi_good = 40 <= row["rsi"] <= 60
     return bounce and rsi_good
 
-# --- BACKTEST ---
-def backtest(df, config):
+# --- BACKTEST for single strategy ---
+def backtest_strategy(df, strategy_name, config):
     balance = initial_balance
     position = 0
     buy_price = 0
@@ -139,38 +139,36 @@ def backtest(df, config):
         row = df.iloc[i]
         prev_row = df.iloc[i-1]
 
-        signals = []
+        signal = False
+        if strategy_name == "EMA_RSI_VWAP":
+            signal = strategy_ema_rsi_vwap(row, prev_row)
+        elif strategy_name == "BREAKOUT_RETEST":
+            signal = strategy_breakout_retest(df, i)
+        elif strategy_name == "SCALPING_VWAP":
+            signal = strategy_scalping_vwap(row, prev_row)
 
-        if config["use_ema_rsi_vwap"] and strategy_ema_rsi_vwap(row, prev_row):
-            signals.append("EMA_RSI_VWAP")
-
-        if config["use_breakout_retest"] and strategy_breakout_retest(df, i):
-            signals.append("BREAKOUT_RETEST")
-
-        if config["use_scalping_vwap"] and strategy_scalping_vwap(row, prev_row):
-            signals.append("SCALPING_VWAP")
-
-        if position == 0 and signals:
+        if position == 0 and signal:
             buy_price = row["close"]
             position = balance / buy_price
             balance = 0
-            trade_log.append((df.index[i], "BUY", buy_price, signals))
+            trade_log.append((df.index[i], "BUY", buy_price))
 
         elif position > 0:
             current_price = row["close"]
             if current_price >= buy_price * (1 + config["take_profit_pct"]):
                 balance = position * current_price
-                trade_log.append((df.index[i], "SELL_TP", current_price, None))
+                trade_log.append((df.index[i], "SELL_TP", current_price))
                 position = 0
             elif current_price <= buy_price * (1 - config["stop_loss_pct"]):
                 balance = position * current_price
-                trade_log.append((df.index[i], "SELL_SL", current_price, None))
+                trade_log.append((df.index[i], "SELL_SL", current_price))
                 position = 0
 
+    # Close position at end if still open
     if position > 0:
         last_price = df["close"].iloc[-1]
         balance = position * last_price
-        trade_log.append((df.index[-1], "SELL_EOD", last_price, None))
+        trade_log.append((df.index[-1], "SELL_EOD", last_price))
         position = 0
 
     return balance, trade_log
@@ -183,23 +181,39 @@ def main():
     df = add_indicators(df)
     print("Indicators added.")
 
-    final_balance, trades = backtest(df, config)
+    strategies = []
+    if config["use_ema_rsi_vwap"]:
+        strategies.append("EMA_RSI_VWAP")
+    if config["use_breakout_retest"]:
+        strategies.append("BREAKOUT_RETEST")
+    if config["use_scalping_vwap"]:
+        strategies.append("SCALPING_VWAP")
 
-    print(f"\nInitial Balance: ${initial_balance}")
-    print(f"Final Balance:   ${final_balance:.2f}")
-    print(f"Net Return:      {((final_balance - initial_balance)/initial_balance)*100:.2f}%")
-    print(f"Total trades:    {len(trades)//2}")
+    results = []
 
-    print("\nTrade Log:")
-    for t in trades:
-        date_str = t[0].strftime("%Y-%m-%d %H:%M")
-        action = t[1]
-        price = t[2]
-        signals = t[3]
-        if signals:
-            print(f"{date_str} | {action} @ {price:.2f} | Signals: {', '.join(signals)}")
-        else:
-            print(f"{date_str} | {action} @ {price:.2f}")
+    for strat in strategies:
+        print(f"\nBacktesting strategy: {strat}")
+        final_balance, trades = backtest_strategy(df, strat, config)
+        net_return_pct = ((final_balance - initial_balance) / initial_balance) * 100
+        num_trades = len([t for t in trades if t[1] == "BUY"])
+        print(f"Initial Balance: ${initial_balance}")
+        print(f"Final Balance:   ${final_balance:.2f}")
+        print(f"Net Return:      {net_return_pct:.2f}%")
+        print(f"Total trades:    {num_trades}")
+
+        results.append({
+            "strategy": strat,
+            "initial_balance": initial_balance,
+            "final_balance": final_balance,
+            "net_return_pct": net_return_pct,
+            "total_trades": num_trades,
+            "trade_log": trades
+        })
+
+    # Summary Table
+    print("\n--- Summary of All Strategies ---")
+    summary_df = pd.DataFrame(results)
+    print(summary_df[["strategy", "initial_balance", "final_balance", "net_return_pct", "total_trades"]])
 
 if __name__ == "__main__":
     main()
