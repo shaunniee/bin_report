@@ -9,7 +9,7 @@ import os
 # --- CONFIGURATION ---
 symbol = "XRPUSDT"
 interval = "15m"
-days = 365  # 1 year
+days = 730  # 1 year
 limit_per_request = 1000
 initial_balance = 10000
 data_file = f"{symbol}_{interval}_{days}d.csv"
