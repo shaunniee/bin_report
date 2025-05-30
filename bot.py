@@ -7,7 +7,7 @@ from ta.trend import EMAIndicator
 import os
 
 # --- CONFIGURATION ---
-symbol = "BTCUSDT"
+symbol = "XRPUSDT"
 interval = "15m"
 days = 365  # 1 year
 limit_per_request = 1000
@@ -15,7 +15,7 @@ initial_balance = 10000
 data_file = f"{symbol}_{interval}_{days}d.csv"
 
 config = {
-    "stop_loss_pct": 0.30,  # 2%
+    "stop_loss_pct": 0.06,  # 2%
     "take_profit_pct": 0.03,  # 3%
 }
 
