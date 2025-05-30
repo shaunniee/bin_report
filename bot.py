@@ -7,7 +7,7 @@ from ta.trend import EMAIndicator
 import os
 
 # --- CONFIGURATION ---
-symbol = "XRPUSDT"
+symbol = "BTCUSDT"
 interval = "15m"
 days = 730  # 1 year
 limit_per_request = 1000
