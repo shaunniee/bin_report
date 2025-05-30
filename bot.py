@@ -9,14 +9,14 @@ import os
 # --- CONFIGURATION ---
 symbol = "BTCUSDT"
 interval = "15m"
-days = 730  # 1 year
+days = 730  # 2 years (730 days)
 limit_per_request = 1000
 initial_balance = 10000
 data_file = f"{symbol}_{interval}_{days}d.csv"
 
 config = {
-    "stop_loss_pct": 0.20,  # 2%
-    "take_profit_pct": 0.03,  # 3%
+    "stop_loss_pct": 0.20,  # 2% initial stop loss
+    "take_profit_pct": 0.03,  # 3% take profit
 }
 
 strategies = ["EMA_RSI_VWAP", "BREAKOUT_RETEST", "SCALPING_VWAP"]
@@ -136,6 +136,7 @@ def backtest_strategy(df, strategy_name, config):
 
     sl_hits = 0
     tp_hits = 0
+    trailing_stop = None
 
     for i in range(1, len(df)-1):
         row = df.iloc[i]
@@ -154,19 +155,36 @@ def backtest_strategy(df, strategy_name, config):
             position = balance / buy_price
             balance = 0
             trade_log.append((df.index[i], "BUY", buy_price))
+            
+            # Initialize trailing stop loss at initial stop loss level below buy price
+            trailing_stop = buy_price * (1 - config["stop_loss_pct"])  # e.g. 2% below buy
 
         elif position > 0:
             current_price = row["close"]
+
+            # Move trailing stop up based on price movement
+            if current_price >= buy_price * 1.02:  # price +2%
+                new_trailing = buy_price * 1.02
+                if new_trailing > trailing_stop:
+                    trailing_stop = new_trailing
+            elif current_price >= buy_price * 1.01:  # price +1%
+                new_trailing = buy_price * 1.01
+                if new_trailing > trailing_stop:
+                    trailing_stop = new_trailing
+
+            # Sell conditions
             if current_price >= buy_price * (1 + config["take_profit_pct"]):
                 balance = position * current_price
                 trade_log.append((df.index[i], "SELL_TP", current_price))
                 position = 0
                 tp_hits += 1
-            elif current_price <= buy_price * (1 - config["stop_loss_pct"]):
+                trailing_stop = None
+            elif current_price <= trailing_stop:
                 balance = position * current_price
                 trade_log.append((df.index[i], "SELL_SL", current_price))
                 position = 0
                 sl_hits += 1
+                trailing_stop = None
 
     # Close position at end if still open
     if position > 0:
@@ -174,6 +192,7 @@ def backtest_strategy(df, strategy_name, config):
         balance = position * last_price
         trade_log.append((df.index[-1], "SELL_EOD", last_price))
         position = 0
+        trailing_stop = None
 
     return balance, trade_log, sl_hits, tp_hits
 
@@ -207,13 +226,9 @@ def main():
             "total_trades": num_trades,
             "tp_hits": tp_hits,
             "sl_hits": sl_hits,
-            "trade_log": trades
         })
 
-    # Print summary table
-    summary_df = pd.DataFrame(results)
-    print("\nSummary of all strategies:")
-    print(summary_df[["strategy", "initial_balance", "final_balance", "net_return_pct", "total_trades", "tp_hits", "sl_hits"]])
+    print("\nAll done.")
 
 if __name__ == "__main__":
     main()
