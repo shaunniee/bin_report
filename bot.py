@@ -9,15 +9,10 @@ import os
 # --- CONFIGURATION ---
 symbol = "BTCUSDT"
 interval = "15m"
-days = 730  # 2 years (730 days)
+days = 730  # 2 years approx
 limit_per_request = 1000
 initial_balance = 10000
 data_file = f"{symbol}_{interval}_{days}d.csv"
-
-config = {
-    "stop_loss_pct": 0.20,  # 2% initial stop loss
-    "take_profit_pct": 0.03,  # 3% take profit
-}
 
 strategies = ["EMA_RSI_VWAP", "BREAKOUT_RETEST", "SCALPING_VWAP"]
 
@@ -138,7 +133,9 @@ def backtest_strategy(df, strategy_name, config):
     tp_hits = 0
     profit_sl_hits = 0
     loss_sl_hits = 0
-    trailing_stop = None
+
+    # Dynamic trailing stop loss level in absolute price terms
+    trailing_sl_price = None
 
     for i in range(1, len(df)-1):
         row = df.iloc[i]
@@ -156,72 +153,52 @@ def backtest_strategy(df, strategy_name, config):
             buy_price = row["close"]
             position = balance / buy_price
             balance = 0
-            trade_log.append({"date": df.index[i], "type": "BUY", "price": buy_price})
-
-            # Initialize trailing stop loss at initial stop loss level below buy price
-            trailing_stop = buy_price * (1 - config["stop_loss_pct"])  # e.g. 2% below buy
+            trailing_sl_price = buy_price * (1 - config["stop_loss_pct"])
+            trade_log.append({"time": df.index[i], "type": "BUY", "price": buy_price})
 
         elif position > 0:
             current_price = row["close"]
 
-            # Move trailing stop up based on price movement
-            if current_price >= buy_price * 1.02:  # price +2%
-                new_trailing = buy_price * 1.02
-                if new_trailing > trailing_stop:
-                    trailing_stop = new_trailing
-            elif current_price >= buy_price * 1.01:  # price +1%
-                new_trailing = buy_price * 1.01
-                if new_trailing > trailing_stop:
-                    trailing_stop = new_trailing
+            # Update trailing stop loss if price moves up by +1%, +2%, +3%, ... from buy price
+            price_move_pct = (current_price - buy_price) / buy_price
+            if price_move_pct >= 0.01:
+                # Move stop loss up to the highest integer percent reached, e.g. at +2.3%, SL = +2%
+                new_trailing_sl = buy_price * (1 + int(price_move_pct * 100) / 100)
+                # Only move trailing SL up, never down
+                if new_trailing_sl > trailing_sl_price:
+                    trailing_sl_price = new_trailing_sl
 
-            # Sell conditions
+            # Check take profit hit
             if current_price >= buy_price * (1 + config["take_profit_pct"]):
                 balance = position * current_price
-                trade_log.append({"date": df.index[i], "type": "SELL_TP", "price": current_price})
+                trade_log.append({"time": df.index[i], "type": "SELL_TP", "price": current_price})
                 position = 0
                 tp_hits += 1
-                trailing_stop = None
-            elif current_price <= trailing_stop:
+                trailing_sl_price = None
+
+            # Check stop loss hit (either trailing SL or initial SL)
+            elif current_price <= trailing_sl_price:
                 balance = position * current_price
-                trade_log.append({"date": df.index[i], "type": "SELL_SL", "price": current_price})
-                position = 0
+                trade_log.append({"time": df.index[i], "type": "SELL_SL", "price": current_price})
+
                 sl_hits += 1
-                # Log profit or loss stop loss
+                # Count if SL was hit at profit or loss relative to buy price
                 if current_price > buy_price:
                     profit_sl_hits += 1
                 else:
                     loss_sl_hits += 1
-                trailing_stop = None
+
+                position = 0
+                trailing_sl_price = None
 
     # Close position at end if still open
     if position > 0:
         last_price = df["close"].iloc[-1]
         balance = position * last_price
-        trade_log.append({"date": df.index[-1], "type": "SELL_EOD", "price": last_price})
+        trade_log.append({"time": df.index[-1], "type": "SELL_EOD", "price": last_price})
         position = 0
-        trailing_stop = None
 
     return balance, trade_log, sl_hits, tp_hits, profit_sl_hits, loss_sl_hits
-
-def summarize_monthly_profit(trade_log):
-    # Calculate monthly profit from trades
-    monthly_profit = {}
-
-    # Trades should be in pairs: BUY followed by SELL
-    for i in range(0, len(trade_log)-1, 2):
-        buy = trade_log[i]
-        sell = trade_log[i+1]
-
-        # Profit for trade
-        profit = sell["price"] - buy["price"]
-
-        month_str = buy["date"].strftime("%Y-%m")
-        monthly_profit[month_str] = monthly_profit.get(month_str, 0) + profit
-
-    # Convert to sorted list
-    monthly_profit = dict(sorted(monthly_profit.items()))
-
-    return monthly_profit
 
 # --- MAIN ---
 def main():
@@ -231,39 +208,72 @@ def main():
     df = add_indicators(df)
     print("Indicators added.")
 
-    results = []
+    stop_loss_percents = [x / 100 for x in range(1, 21)]  # 1% to 20%
+    take_profit_percents = [x / 100 for x in range(1, 9)]  # 1% to 8%
+
+    all_results = []
 
     for strat in strategies:
-        print(f"\nBacktesting strategy: {strat}")
-        final_balance, trades, sl_hits, tp_hits, profit_sl_hits, loss_sl_hits = backtest_strategy(df, strat, config)
-        net_return_pct = ((final_balance - initial_balance) / initial_balance) * 100
-        num_trades = len([t for t in trades if t["type"] == "BUY"])
-        print(f"Initial Balance: ${initial_balance}")
-        print(f"Final Balance:   ${final_balance:.2f}")
-        print(f"Net Return:      {net_return_pct:.2f}%")
-        print(f"Total trades:    {num_trades}")
-        print(f"Take-Profit hits: {tp_hits}")
-        print(f"Stop-Loss hits:   {sl_hits}")
-        print(f"Profit Stop-Loss hits: {profit_sl_hits}")
-        print(f"Loss Stop-Loss hits:   {loss_sl_hits}")
+        print(f"\nStrategy: {strat}")
+        for sl in stop_loss_percents:
+            for tp in take_profit_percents:
+                config = {
+                    "stop_loss_pct": sl,
+                    "take_profit_pct": tp,
+                }
+                final_balance, trades, sl_hits, tp_hits, profit_sl_hits, loss_sl_hits = backtest_strategy(df, strat, config)
+                net_return_pct = ((final_balance - initial_balance) / initial_balance) * 100
+                num_trades = len([t for t in trades if t["type"] == "BUY"])
 
-        monthly_profit = summarize_monthly_profit(trades)
-        print("Monthly profit (example):")
-        for month, profit in monthly_profit.items():
-            print(f"  {month}: {profit:.2f}")
+                print(f"SL: {sl*100:.1f}%, TP: {tp*100:.1f}%, Final: ${final_balance:.2f}, Return: {net_return_pct:.2f}%, Trades: {num_trades}, TP hits: {tp_hits}, SL hits: {sl_hits}, Profit SL: {profit_sl_hits}, Loss SL: {loss_sl_hits}")
 
-        results.append({
-            "strategy": strat,
-            "final_balance": final_balance,
-            "net_return_pct": net_return_pct,
-            "num_trades": num_trades,
-            "take_profit_hits": tp_hits,
-            "stop_loss_hits": sl_hits,
-            "profit_stop_loss_hits": profit_sl_hits,
-            "loss_stop_loss_hits": loss_sl_hits,
-        })
+                # Monthly summary of profits (simple example)
+                monthly_profits = {}
+                for t in trades:
+                    if t["type"].startswith("SELL"):
+                        month = t["time"].strftime("%Y-%m")
+                        profit = (t["price"] - buy_price) * position if t["type"] == "SELL_EOD" else (t["price"] - buy_price) * (initial_balance / buy_price)
+                        monthly_profits[month] = monthly_profits.get(month, 0) + profit
 
-    return results
+                all_results.append({
+                    "strategy": strat,
+                    "stop_loss_pct": sl,
+                    "take_profit_pct": tp,
+                    "final_balance": final_balance,
+                    "net_return_pct": net_return_pct,
+                    "num_trades": num_trades,
+                    "take_profit_hits": tp_hits,
+                    "stop_loss_hits": sl_hits,
+                    "profit_stop_loss_hits": profit_sl_hits,
+                    "loss_stop_loss_hits": loss_sl_hits,
+                    "monthly_profits": monthly_profits
+                })
+
+    # Save results to CSV
+    result_rows = []
+    for res in all_results:
+        base = {
+            "strategy": res["strategy"],
+            "stop_loss_pct": res["stop_loss_pct"],
+            "take_profit_pct": res["take_profit_pct"],
+            "final_balance": res["final_balance"],
+            "net_return_pct": res["net_return_pct"],
+            "num_trades": res["num_trades"],
+            "take_profit_hits": res["take_profit_hits"],
+            "stop_loss_hits": res["stop_loss_hits"],
+            "profit_stop_loss_hits": res["profit_stop_loss_hits"],
+            "loss_stop_loss_hits": res["loss_stop_loss_hits"],
+        }
+        # flatten monthly profits, one column per month
+        for month, profit in res["monthly_profits"].items():
+            base[f"profit_{month}"] = profit
+        result_rows.append(base)
+
+    df_results = pd.DataFrame(result_rows)
+    df_results.to_csv("backtest_combinations_results.csv", index=False)
+    print("\nSaved all results to backtest_combinations_results.csv")
+
+    return all_results
 
 if __name__ == "__main__":
     main()
