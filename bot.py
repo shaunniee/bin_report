@@ -14,7 +14,7 @@ limit_per_request = 1000
 initial_balance = 10000
 data_file = f"{symbol}_{interval}_{days}d.csv"
 
-strategies = ["EMA_RSI_VWAP", "BREAKOUT_RETEST", "SCALPING_VWAP"]
+strategies = ["BREAKOUT_RETEST", "SCALPING_VWAP"]
 
 # --- FETCH BINANCE KLINES ---
 def get_klines(symbol, interval, start_time, end_time, limit=1000):
