@@ -1,205 +1,195 @@
 import requests
 import pandas as pd
-import time
 import numpy as np
-from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator
-import os
+import datetime
 
-# --- CONFIGURATION ---
+# Config
 symbol = "BTCUSDT"
 interval = "15m"
 days = 365  # 1 year
-limit_per_request = 1000
-initial_balance = 10000
-data_file = f"{symbol}_{interval}_{days}d.csv"
+initial_balance = 1000.0
 
 config = {
-    "use_ema_rsi_vwap": True,
-    "use_breakout_retest": True,
-    "use_scalping_vwap": True,
-    "stop_loss_pct": 0.10,  # 2%
-    "take_profit_pct": 0.03,  # 3%
+    "stop_loss_pct": 0.10,   # 10% stop loss
+    "take_profit_pct": 0.03, # 3% take profit
 }
 
-# --- FETCH BINANCE KLINES ---
-def get_klines(symbol, interval, start_time, end_time, limit=1000):
-    url = "https://api.binance.com/api/v3/klines"
-    params = {
-        "symbol": symbol,
-        "interval": interval,
-        "limit": limit,
-        "startTime": start_time,
-        "endTime": end_time
-    }
-    response = requests.get(url, params=params)
-    data = response.json()
-    return data
-
+# 1. Fetch historical klines from Binance public API
 def fetch_data(symbol, interval, days):
-    if os.path.exists(data_file):
-        print(f"Loading cached data from {data_file}")
-        df = pd.read_csv(data_file, index_col=0, parse_dates=True)
-        return df
-
-    print(f"Fetching {days} days of data for {symbol} @ {interval}...")
-
-    end_time = int(time.time() * 1000)
+    limit = 1000  # max per request
+    end_time = int(datetime.datetime.now().timestamp() * 1000)
     start_time = end_time - days * 24 * 60 * 60 * 1000
+
     all_klines = []
 
-    total_klines_needed = days * 24 * 4  # 4 x 15min intervals per hour
-    fetched_klines = 0
-
     while start_time < end_time:
-        klines = get_klines(symbol, interval, start_time, end_time, limit_per_request)
-        if not klines:
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&startTime={start_time}&limit={limit}"
+        data = requests.get(url).json()
+        if not data:
             break
-        all_klines += klines
-        fetched_klines += len(klines)
-        start_time = klines[-1][0] + 1
 
-        progress = (fetched_klines / total_klines_needed) * 100
-        print(f"Progress: {progress:.2f}% ({fetched_klines} klines fetched)", end='\r')
+        all_klines.extend(data)
 
-        time.sleep(0.25)  # rate limit
+        last_time = data[-1][0]
+        start_time = last_time + 1
 
-        if len(klines) < limit_per_request:
-            break  # no more data
+        if len(data) < limit:
+            break
 
-    print("\nFinished fetching data.")
-
+    # Create DataFrame
     df = pd.DataFrame(all_klines, columns=[
         "open_time", "open", "high", "low", "close", "volume",
         "close_time", "quote_asset_volume", "number_of_trades",
-        "taker_buy_base_volume", "taker_buy_quote_volume", "ignore"
+        "taker_buy_base", "taker_buy_quote", "ignore"
     ])
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
-    df.set_index("open_time", inplace=True)
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = df[col].astype(float)
 
-    # Save for later use
-    df.to_csv(data_file)
-    print(f"Saved data to {data_file}")
-
+    # Convert types
+    df["open_time"] = pd.to_datetime(df["open_time"], unit='ms')
+    df["close_time"] = pd.to_datetime(df["close_time"], unit='ms')
+    df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].astype(float)
     return df
 
-# --- MANUAL VWAP ---
-def add_vwap(df, window=14):
-    typical_price = (df['high'] + df['low'] + df['close']) / 3
-    pv = typical_price * df['volume']
-    vwap = pv.rolling(window=window).sum() / df['volume'].rolling(window=window).sum()
-    df['vwap'] = vwap
-    return df
-
-# --- INDICATORS ---
+# 2. Add Indicators (EMA, RSI, VWAP)
 def add_indicators(df):
-    df["ema9"] = EMAIndicator(df["close"], window=9).ema_indicator()
-    df["ema21"] = EMAIndicator(df["close"], window=21).ema_indicator()
-    df["rsi"] = RSIIndicator(df["close"], window=14).rsi()
-    df = add_vwap(df)
+    df = df.copy()
+    df["EMA20"] = df["close"].ewm(span=20, adjust=False).mean()
+
+    # RSI calculation
+    delta = df["close"].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df["RSI"] = 100 - (100 / (1 + rs))
+
+    # VWAP calculation
+    typical_price = (df["high"] + df["low"] + df["close"]) / 3
+    cum_vol_price = (typical_price * df["volume"]).cumsum()
+    cum_volume = df["volume"].cumsum()
+    df["VWAP"] = cum_vol_price / cum_volume
+
     return df
 
-# --- STRATEGIES ---
-def strategy_ema_rsi_vwap(row, prev_row):
-    if prev_row is None:
-        return False
-    price_cross_vwap = (prev_row["close"] < prev_row["vwap"]) and (row["close"] > row["vwap"])
-    ema_cross = (prev_row["ema9"] < prev_row["ema21"]) and (row["ema9"] > row["ema21"])
-    rsi_cross = (prev_row["rsi"] < 30) and (row["rsi"] > 30)
-    return price_cross_vwap and ema_cross and rsi_cross
+# 3. Strategies
 
+# EMA_RSI_VWAP: buy if close > EMA20, RSI < 30, close > VWAP
+def strategy_ema_rsi_vwap(row, prev_row=None):
+    return (row["close"] > row["EMA20"]) and (row["RSI"] < 30) and (row["close"] > row["VWAP"])
+
+# BREAKOUT_RETEST: buy if close breaks above previous high and retests support (simple version)
 def strategy_breakout_retest(df, idx):
-    if idx < 13:
+    if idx < 2:
         return False
-    window = df.iloc[idx-13:idx-1]
-    resistance = window["high"].max()
-    current = df.iloc[idx]
-    prev = df.iloc[idx-1]
-    breakout = (prev["close"] <= resistance) and (current["close"] > resistance)
-    retest = (idx + 1 < len(df)) and (df.iloc[idx+1]["low"] >= resistance)
+    prev_high = df["high"].iloc[idx-2]
+    prev_close = df["close"].iloc[idx-1]
+    current_close = df["close"].iloc[idx]
+
+    breakout = (current_close > prev_high)
+    retest = (prev_close < prev_high) and (current_close > prev_close)
     return breakout and retest
 
+# SCALPING_VWAP: buy if price crosses VWAP from below
 def strategy_scalping_vwap(row, prev_row):
     if prev_row is None:
         return False
-    bounce = (row["low"] <= row["vwap"] * 1.002) and (row["close"] > row["vwap"])
-    rsi_good = 40 <= row["rsi"] <= 60
-    return bounce and rsi_good
+    crossed = (prev_row["close"] < prev_row["VWAP"]) and (row["close"] > row["VWAP"])
+    return crossed
 
-# --- BACKTEST ---
-def backtest(df, config):
+# 4. Backtest single strategy
+def backtest_strategy(df, strategy_func, config, strategy_name):
     balance = initial_balance
     position = 0
     buy_price = 0
-    trade_log = []
+    trades = []
+
+    wins = 0
+    losses = 0
+    total_profit = 0
 
     for i in range(1, len(df)-1):
         row = df.iloc[i]
         prev_row = df.iloc[i-1]
 
-        signals = []
+        # Signal depends on strategy signature
+        if strategy_name == "EMA_RSI_VWAP":
+            signal = strategy_func(row, prev_row)
+        else:
+            signal = strategy_func(df, i)
 
-        if config["use_ema_rsi_vwap"] and strategy_ema_rsi_vwap(row, prev_row):
-            signals.append("EMA_RSI_VWAP")
-
-        if config["use_breakout_retest"] and strategy_breakout_retest(df, i):
-            signals.append("BREAKOUT_RETEST")
-
-        if config["use_scalping_vwap"] and strategy_scalping_vwap(row, prev_row):
-            signals.append("SCALPING_VWAP")
-
-        if position == 0 and signals:
+        if position == 0 and signal:
             buy_price = row["close"]
             position = balance / buy_price
             balance = 0
-            trade_log.append((df.index[i], "BUY", buy_price, signals))
+            trades.append(("BUY", df.index[i], buy_price))
 
         elif position > 0:
             current_price = row["close"]
             if current_price >= buy_price * (1 + config["take_profit_pct"]):
+                profit = (current_price - buy_price) * position
+                total_profit += profit
+                wins += 1
                 balance = position * current_price
-                trade_log.append((df.index[i], "SELL_TP", current_price, None))
-                position = 0
-            elif current_price <= buy_price * (1 - config["stop_loss_pct"]):
-                balance = position * current_price
-                trade_log.append((df.index[i], "SELL_SL", current_price, None))
+                trades.append(("SELL_TP", df.index[i], current_price))
                 position = 0
 
+            elif current_price <= buy_price * (1 - config["stop_loss_pct"]):
+                profit = (current_price - buy_price) * position
+                total_profit += profit
+                losses += 1
+                balance = position * current_price
+                trades.append(("SELL_SL", df.index[i], current_price))
+                position = 0
+
+    # Close any open position at the end
     if position > 0:
         last_price = df["close"].iloc[-1]
+        profit = (last_price - buy_price) * position
+        total_profit += profit
+        if profit > 0:
+            wins += 1
+        else:
+            losses += 1
         balance = position * last_price
-        trade_log.append((df.index[-1], "SELL_EOD", last_price, None))
+        trades.append(("SELL_EOD", df.index[-1], last_price))
         position = 0
 
-    return balance, trade_log
+    total_trades = wins + losses
+    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
 
-# --- MAIN ---
+    return {
+        "strategy": strategy_name,
+        "final_balance": balance,
+        "total_profit": total_profit,
+        "total_trades": total_trades,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "trades": trades
+    }
+
 def main():
+    print(f"Fetching {symbol} {interval} data for last {days} days...")
     df = fetch_data(symbol, interval, days)
-    print(f"Data loaded: {len(df)} rows")
+    print(f"Data fetched: {len(df)} rows")
 
     df = add_indicators(df)
     print("Indicators added.")
 
-    final_balance, trades = backtest(df, config)
+    results = []
+    results.append(backtest_strategy(df, strategy_ema_rsi_vwap, config, "EMA_RSI_VWAP"))
+    results.append(backtest_strategy(df, strategy_breakout_retest, config, "BREAKOUT_RETEST"))
+    results.append(backtest_strategy(df, strategy_scalping_vwap, config, "SCALPING_VWAP"))
 
-    print(f"\nInitial Balance: ${initial_balance}")
-    print(f"Final Balance:   ${final_balance:.2f}")
-    print(f"Net Return:      {((final_balance - initial_balance)/initial_balance)*100:.2f}%")
-    print(f"Total trades:    {len(trades)//2}")
+    print(f"\nInitial Balance: ${initial_balance}\n")
 
-    print("\nTrade Log:")
-    for t in trades:
-        date_str = t[0].strftime("%Y-%m-%d %H:%M")
-        action = t[1]
-        price = t[2]
-        signals = t[3]
-        if signals:
-            print(f"{date_str} | {action} @ {price:.2f} | Signals: {', '.join(signals)}")
-        else:
-            print(f"{date_str} | {action} @ {price:.2f}")
+    for res in results:
+        print(f"Strategy: {res['strategy']}")
+        print(f"  Final Balance: ${res['final_balance']:.2f}")
+        print(f"  Total Profit:  ${res['total_profit']:.2f}")
+        print(f"  Trades:        {res['total_trades']}")
+        print(f"  Wins:          {res['wins']}")
+        print(f"  Losses:        {res['losses']}")
+        print(f"  Win Rate:      {res['win_rate']:.2f}%")
+        print("-" * 40)
 
 if __name__ == "__main__":
     main()
