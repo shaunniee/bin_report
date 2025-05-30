@@ -18,7 +18,7 @@ config = {
     "use_ema_rsi_vwap": True,
     "use_breakout_retest": True,
     "use_scalping_vwap": True,
-    "stop_loss_pct": 0.02,  # 2%
+    "stop_loss_pct": 0.10,  # 2%
     "take_profit_pct": 0.03,  # 3%
 }
 
