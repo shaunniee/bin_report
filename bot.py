@@ -270,3 +270,7 @@ def main():
     print("\nSaved all results to backtest_combinations_results.csv")
 
     return all_results
+# ... your entire code ...
+
+if __name__ == "__main__":
+    main()
