@@ -1,399 +1,108 @@
-import os
-import ccxt
-import math
-import time
-import pymongo
-import pandas as pd
 import requests
-import threading
-import functools
-import traceback
-from ta.trend import EMAIndicator, MACD, ADXIndicator
+import pandas as pd
+import time
 from ta.momentum import RSIIndicator
-from ta.volatility import AverageTrueRange
-from dotenv import load_dotenv
-from datetime import datetime, timedelta, timezone
 
+# --- CONFIGURATION ---
+symbol = "BTCUSDT"
+interval = "15m"
+days = 60
+limit_per_request = 1000
 
+# --- HAMMER PATTERN DETECTION ---
+def is_hammer(o, h, l, c):
+    body = abs(c - o)
+    candle_range = h - l
+    lower_shadow = min(o, c) - l
+    upper_shadow = h - max(o, c)
+    return body < candle_range * 0.3 and lower_shadow > body * 2 and upper_shadow < body
 
-# Load environment variables
-load_dotenv()
-API_KEY = os.getenv("BINANCE_API_KEY")
-API_SECRET = os.getenv("BINANCE_API_SECRET")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-MONGO_URI = os.getenv("MONGO_URI")
-
-# MongoDB setup
-client = pymongo.MongoClient(MONGO_URI)
-db = client["tradingbot"]
-positions_collection = db["positions"]
-active_collection = db["active_trades"]
-trade_logs_collection = db["trade_logs"]
-from logger import init_logger,log_skipped_signal,log_successful_buy,log_trade_pnl,summarize_skipped_signals,weekly_signal_summary
-init_logger(db)
-
-# Binance testnet setup
-exchange = ccxt.binance({
-    "apiKey": API_KEY,
-    "secret": API_SECRET,
-    "enableRateLimit": True,
-    "options": {"defaultType": "spot"},
-})
-exchange.set_sandbox_mode(True)
-markets = exchange.load_markets()
-
-# Retry decorator
-def retry_on_exception(max_retries=3, delay=5):
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            for attempt in range(max_retries):
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    print(f"Error: {e}. Retrying {func.__name__} ({attempt+1}/{max_retries})...")
-                    time.sleep(delay)
-            raise Exception(f"Failed after {max_retries} retries: {func.__name__}")
-        return wrapper
-    return decorator
-
-@retry_on_exception()
-def fetch_ohlcv(symbol="BTC/USDT", timeframe="5m", limit=100):
-    data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-    return df
-
-def apply_indicators(df):
-    df["EMA9"] = EMAIndicator(close=df["close"], window=9).ema_indicator()
-    df["EMA21"] = EMAIndicator(close=df["close"], window=21).ema_indicator()
-    df["RSI"] = RSIIndicator(close=df["close"], window=14).rsi()
-    df["ATR"] = AverageTrueRange(high=df["high"], low=df["low"], close=df["close"], window=14).average_true_range()
-    df["VWAP"] = (df["volume"] * (df["high"] + df["low"] + df["close"]) / 3).cumsum() / df["volume"].cumsum()
-    macd = MACD(close=df["close"])
-    df["MACD"] = macd.macd()
-    df["MACD_signal"] = macd.macd_signal()
-    df["MACD_diff"] = macd.macd_diff()
-    adx = ADXIndicator(high=df["high"], low=df["low"], close=df["close"], window=14)
-    df["ADX"] = adx.adx()
-    df["OBV"] = (df["volume"] * ((df["close"] > df["close"].shift(1)) * 2 - 1)).cumsum()
-    df["Volume_SMA"] = df["volume"].rolling(window=20).mean()
-    df["Volume_Spike"] = df["volume"] > 1.5 * df["Volume_SMA"]
-    return df
-
-def detect_market_regime(df):
-    return "trending" if df["ADX"].iloc[-1] > 25 else "ranging"
-
-def get_adaptive_rsi_bounds(df):
-    atr = df["ATR"].iloc[-1]
-    atr_mean = df["ATR"].rolling(window=20).mean().iloc[-1]
-    return (45, 65) if atr > atr_mean else (40, 70)
-
-def get_recent_pnl(limit=10):
-    trades = list(trade_logs_collection.find().sort("timestamp", -1).limit(limit))
-    return sum(trade.get("pnl", 0) for trade in trades)
-
-def should_pause_trading():
-    return get_recent_pnl() < -50
-
-def should_buy(df):
-    latest = df.iloc[-1]
-    regime = detect_market_regime(df)
-    rsi_lower, rsi_upper = get_adaptive_rsi_bounds(df)
-
-    passed = []
-    failed = []
-
-    if regime == "trending":
-        passed.append("Regime: trending (ADX > 25)")
-    else:
-        failed.append("Regime: not trending (ADX ≤ 25)")
-
-    if latest["EMA9"] > latest["EMA21"]:
-        passed.append("EMA: EMA9 > EMA21")
-    else:
-        failed.append("EMA: EMA9 ≤ EMA21")
-
-    if rsi_lower < latest["RSI"] < rsi_upper:
-        passed.append(f"RSI in bounds: {latest['RSI']:.2f}")
-    else:
-        failed.append(f"RSI out of bounds: {latest['RSI']:.2f} not in ({rsi_lower}, {rsi_upper})")
-
-    if latest["close"] > latest["VWAP"]:
-        passed.append("Close > VWAP")
-    else:
-        failed.append("Close ≤ VWAP")
-
-    if latest["ADX"] > 20:
-        passed.append("ADX > 20")
-    else:
-        failed.append("ADX ≤ 20")
-
-    should_buy = len(failed) == 0
-    return should_buy, passed, failed
-
-
-def should_sell(df, entry_price):
-    latest = df.iloc[-1]
-    regime = detect_market_regime(df)
-    atr = latest["ATR"]
-    rsi = latest["RSI"]
-    price = latest["close"]
-    rsi_lower, rsi_upper = get_adaptive_rsi_bounds(df)
-    if regime == "trending":
-        return (
-            latest["EMA9"] < latest["EMA21"]
-            or rsi > rsi_upper
-            or price < entry_price - 1.5 * atr
-            or latest["MACD_diff"] < 0
-            or latest["ADX"] < 20
-        )
-    else:
-        return rsi > rsi_upper or price < entry_price - 1.0 * atr or price < latest["VWAP"]
-@retry_on_exception()
-def execute_trade(symbol, side, amount):
-    return exchange.create_market_order(symbol, side, amount)
-
-@retry_on_exception()
-def get_balance(asset="USDT"):
-    balance = exchange.fetch_balance()
-    return balance[asset]["free"]
-
-@retry_on_exception()
-def fetch_price(symbol):
-    return exchange.fetch_ticker(symbol)["last"]
-
-def get_precision(symbol):
-    precision_value = markets[symbol]["precision"]["amount"]  # e.g., 0.001
-    return abs(int(round(-1 * (math.log10(precision_value)))))  # Returns 3 for 0.001
-
-
-def send_telegram(message):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message})
-    except Exception as e:
-        print(f"Telegram Error: {e}")
-
-def mark_trade_active(symbol):
-    active_collection.update_one({"symbol": symbol}, {"$set": {"active": True}}, upsert=True)
-
-def unmark_trade_active(symbol):
-    active_collection.delete_one({"symbol": symbol})
-
-def is_trade_active(symbol):
-    return active_collection.find_one({"symbol": symbol}) is not None
-
-def load_positions():
-    return {pos["symbol"]: pos for pos in positions_collection.find()}
-
-def save_position(symbol, position):
-    positions_collection.update_one({"symbol": symbol}, {"$set": position}, upsert=True)
-
-def delete_position(symbol):
-    positions_collection.update_one(
-        {"symbol": symbol},
-        {"$set": {"last_closed": datetime.now(timezone.utc).isoformat()}},
-        upsert=True,
-    )
-
-def is_in_cooldown(symbol, cooldown_minutes=60):
-    pos = positions_collection.find_one({"symbol": symbol})
-    if pos and "last_closed" in pos:
-        last_closed = datetime.fromisoformat(pos["last_closed"])
-        return datetime.now(timezone.utc) < last_closed + timedelta(minutes=cooldown_minutes)
-    return False
-
-def confirm_higher_timeframe(symbol):
-    df_15m = fetch_ohlcv(symbol, timeframe="15m", limit=50)
-    df_15m = apply_indicators(df_15m)
-    latest = df_15m.iloc[-1]
-    return latest["EMA9"] > latest["EMA21"]
-
-def log_trade(symbol, side, amount, price, pnl):
-    trade_logs_collection.insert_one({
+# --- FETCH BINANCE KLINES ---
+def get_klines(symbol, interval, start_time, end_time, limit=1000):
+    url = "https://api.binance.com/api/v3/klines"
+    params = {
         "symbol": symbol,
-        "side": side,
-        "amount": amount,
-        "price": price,
-        "pnl": pnl,
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    })
-    log_trade_pnl(symbol,exit_price=price,pnl=pnl)
+        "interval": interval,
+        "limit": limit,
+        "startTime": start_time,
+        "endTime": end_time
+    }
+    response = requests.get(url, params=params)
+    data = response.json()
+    return data
 
-def trade_symbol(symbol, per_trade_usdt, base_asset="USDT"):
-    if is_in_cooldown(symbol):
-        print(f"{symbol} is in cooldown. Skipping.")
-        return
-    if should_pause_trading():
-        print("Trading paused due to recent losses.")
-        return
+def fetch_data(symbol, interval, days):
+    end_time = int(time.time() * 1000)
+    start_time = end_time - days * 24 * 60 * 60 * 1000
+    all_klines = []
 
-    mark_trade_active(symbol)
-    try:
-        positions = load_positions()
-        if symbol in positions:
-            position = positions[symbol]
-            print(f"🔄 Resuming existing trade for {symbol}...")
-        
-            amount = position["amount"]
-            buy_price = position["buy_price"]
-            stop_loss = position["stop_loss"]
-            take_profit = position["take_profit"]
-            trailing_stop = position.get("trailing_stop", buy_price - 1.0 * (buy_price * 0.015))
-        
-            start_time = datetime.now(timezone.utc)
-            sold = False
-        
-            while not sold:
-                df = fetch_ohlcv(symbol)
-                df = apply_indicators(df)
-                price = fetch_price(symbol)
-                atr = df["ATR"].iloc[-1]
-                trailing_stop = max(trailing_stop, price - 1.0 * atr)
-        
-                if price >= take_profit:
-                    execute_trade(symbol, "sell", amount)
-                    pnl = (price - buy_price) * amount
-                    send_telegram(f"✅ {symbol} TP Hit (resumed): Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    sold = True
-        
-                elif price <= stop_loss:
-                    execute_trade(symbol, "sell", amount)
-                    pnl = (price - buy_price) * amount
-                    send_telegram(f"🛑 {symbol} SL Hit (resumed): Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    sold = True
-        
-                elif price <= trailing_stop:
-                    execute_trade(symbol, "sell", amount)
-                    pnl = (price - buy_price) * amount
-                    send_telegram(f"🔻 {symbol} Trailing Stop Hit (resumed): Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    sold = True
-        
-                elif should_sell(df, buy_price):
-                    execute_trade(symbol, "sell", amount)
-                    pnl = (price - buy_price) * amount
-                    send_telegram(f"🔻 {symbol} Sell Signal (resumed): Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    sold = True
-        
-                elif datetime.now(timezone.utc) > start_time + timedelta(hours=2):
-                    execute_trade(symbol, "sell", amount)
-                    pnl = (price - buy_price) * amount
-                    send_telegram(f"⏳ {symbol} Timeout (resumed): Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    sold = True
-        
-                time.sleep(30)
-        
-            delete_position(symbol)
-            unmark_trade_active(symbol)
-            return  # 🚨 Don't continue to new buy logic after resuming
-        df = fetch_ohlcv(symbol)
-        df = apply_indicators(df)
-        should_buy_flag,passed_reasons,skip_reasons=should_buy(df)
-        if should_buy_flag and confirm_higher_timeframe(symbol):
-            log_successful_buy(symbol,passed_reasons)
-            precision = get_precision(symbol)
-            amount = round(per_trade_usdt / df["close"].iloc[-1], precision)
-            order = execute_trade(symbol, "buy", amount)
-            buy_price = df["close"].iloc[-1]
-            atr = df["ATR"].iloc[-1]
+    while start_time < end_time:
+        klines = get_klines(symbol, interval, start_time, end_time, limit_per_request)
+        if not klines:
+            break
+        all_klines += klines
+        start_time = klines[-1][0] + 1
+        time.sleep(0.25)  # avoid rate limits
 
-            stop_loss = buy_price - 1.5 * atr
-            take_profit = buy_price + 2.5 * atr
-            trailing_stop = buy_price - 1.0 * atr
+    df = pd.DataFrame(all_klines, columns=[
+        "open_time", "open", "high", "low", "close", "volume",
+        "close_time", "quote_asset_volume", "number_of_trades",
+        "taker_buy_base_volume", "taker_buy_quote_volume", "ignore"
+    ])
+    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
+    df.set_index("open_time", inplace=True)
+    df = df.astype(float)
+    return df
 
-            position = {
-                "symbol": symbol,
-                "amount": amount,
-                "buy_price": buy_price,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
+# --- GET HISTORICAL DATA ---
+print("Fetching data...")
+df = fetch_data(symbol, interval, days)
 
-            save_position(symbol, position)
-            send_telegram(f"📈 {symbol} Buy @ {buy_price:.2f} | TP: {take_profit:.2f}, SL: {stop_loss:.2f}")
+# --- INDICATORS ---
+df["rsi"] = RSIIndicator(df["close"], window=14).rsi()
+df["hammer"] = df.apply(lambda row: is_hammer(row["open"], row["high"], row["low"], row["close"]), axis=1)
+df["buy_signal"] = (df["hammer"]) & (df["rsi"] < 30)
 
-            start_time = datetime.now(timezone.utc)
-            sold = False
+# --- BACKTEST LOGIC ---
+initial_balance = 10000
+balance = initial_balance
+position = 0
+buy_price = 0
+trade_log = []
 
-            while not sold:
-                df = fetch_ohlcv(symbol)
-                df = apply_indicators(df)
-                price = fetch_price(symbol)
+for i in range(1, len(df)):
+    row = df.iloc[i]
+    time = df.index[i]
 
-                trailing_stop = max(trailing_stop, price - 1.0 * atr)
+    if position == 0 and df["buy_signal"].iloc[i]:
+        buy_price = row["close"]
+        position = balance / buy_price
+        balance = 0
+        trade_log.append((time, "BUY", buy_price))
 
-                if price >= take_profit:
-                    execute_trade(symbol, "sell", amount)
-                    pnl = (price - buy_price) * amount
-                    send_telegram(f"✅ {symbol} TP Hit: Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    sold = True
+    elif position > 0:
+        current_price = row["close"]
+        if current_price >= buy_price * 1.03:
+            balance = position * current_price
+            trade_log.append((time, "SELL_TP", current_price))
+            position = 0
+        elif current_price <= buy_price * 0.98:
+            balance = position * current_price
+            trade_log.append((time, "SELL_SL", current_price))
+            position = 0
 
-                elif price <= stop_loss:
-                    execute_trade(symbol, "sell", amount)
-                    pnl = (price - buy_price) * amount
-                    send_telegram(f"🛑 {symbol} SL Hit: Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    sold = True
+# Final position value
+if position > 0:
+    balance = position * df["close"].iloc[-1]
+    trade_log.append((df.index[-1], "SELL_EOD", df['close'].iloc[-1]))
 
-                elif price <= trailing_stop:
-                    execute_trade(symbol, "sell", amount)
-                    pnl = (price - buy_price) * amount
-                    send_telegram(f"🔻 {symbol} Trailing Stop Hit: Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    sold = True
+# --- RESULTS ---
+final_balance = balance
+print(f"\nInitial Balance: ${initial_balance}")
+print(f"Final Balance:   ${final_balance:.2f}")
+print(f"Net Return:      {((final_balance - initial_balance)/initial_balance)*100:.2f}%")
+print(f"Trades executed: {len(trade_log)//2}\n")
 
-                elif should_sell(df, buy_price):
-                    execute_trade(symbol, "sell", amount)
-                    pnl = (price - buy_price) * amount
-                    send_telegram(f"🔻 {symbol} Sell Signal: Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    sold = True
-
-                elif datetime.now(timezone.utc) > start_time + timedelta(hours=2):
-                    execute_trade(symbol, "sell", amount)
-                    pnl = (price - buy_price) * amount
-                    send_telegram(f"⏳ {symbol} Timeout (2h): Sold @ {price:.2f} | PnL: {pnl:.2f} USDT")
-                    sold = True
-
-                time.sleep(30)
-
-            delete_position(symbol)
-
-        else:
-            if not should_buy_flag:
-                msg = f"⚠️ Skipped {symbol} - No Buy Signal.\nReasons:\n- " + "\n- ".join(skip_reasons)
-                send_telegram(msg)
-                log_skipped_signal(symbol, skip_reasons)
-            else:
-                msg = f"⚠️ Skipped {symbol} - Higher timeframe not confirmed (15m EMA9 ≤ EMA21)"
-                send_telegram(msg)
-                log_skipped_signal(symbol, ["Higher timeframe not confirmed (15m EMA9 ≤ EMA21)"])
-
-    except Exception as e:
-        error_msg = f"⚠️ Error with {symbol}: {str(e)}\n\nTrace:\n{traceback.format_exc()}"
-        print(error_msg)
-        send_telegram(error_msg)
-
-    finally:
-        unmark_trade_active(symbol)
-
-def run_bot():
-    symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT"]
-    usdt_balance = get_balance("USDT")
-    per_trade_usdt = (usdt_balance * 0.98) / len(symbols)
-    threads = []
-    if datetime.utcnow().weekday() == 6:  # Run on Sundays
-        send_telegram(summarize_skipped_signals())
-        send_telegram(weekly_signal_summary())
-    for symbol in symbols:
-        thread = threading.Thread(target=trade_symbol, args=(symbol, per_trade_usdt))
-        thread.start()
-        threads.append(thread)
-        time.sleep(2)
-    for thread in threads:
-        thread.join()
-
-# Continuous loop
-while True:
-    run_bot()
-    time.sleep(300)  # Wait 5 minutes between cycles
+# --- TRADE LOG ---
+for t in trade_log:
+    print(f"{t[0]} | {t[1]} @ {t[2]:.2f}")
